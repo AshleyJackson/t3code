@@ -239,6 +239,10 @@
       "types": "./src/terminalLabels.ts",
       "import": "./src/terminalLabels.ts"
     },
+    "./terminalOutput": {
+      "types": "./src/terminalOutput.ts",
+      "import": "./src/terminalOutput.ts"
+    },
     "./relayClient": {
       "types": "./src/relayClient.ts",
       "import": "./src/relayClient.ts"

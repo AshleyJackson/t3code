@@ -44,6 +44,7 @@ export interface DroidContext {
   activeThinkingItems: Map<string, string>;
   activeCompletedAssistantItems: Set<string>;
   activeCompletedThinkingItems: Set<string>;
+  activeStartedToolIds: Set<string>;
   activeTurnError: string | undefined;
   activeTurnState: "completed" | "interrupted" | "failed" | undefined;
   activeTokenUsage: ThreadTokenUsageSnapshot | undefined;

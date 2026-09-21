@@ -79,6 +79,9 @@ export class DroidModelDiscoveryError extends Data.TaggedError("DroidModelDiscov
 
 const defaultSdk: DroidProviderSdk = { listModels };
 
+const isUnsupportedDroidModelDiscoveryError = (error: DroidModelDiscoveryError): boolean =>
+  /unknown method:\s*droid\.list_models/iu.test(error.message);
+
 const modelProviderLabel = (provider: ModelProvider): string => {
   switch (provider) {
     case ModelProvider.ANTHROPIC:
@@ -162,12 +165,15 @@ export const discoverDroidModels = (
   options?: DroidProviderStatusOptions,
 ): Effect.Effect<ReadonlyArray<ServerProviderModel>, DroidModelDiscoveryError> =>
   Effect.tryPromise({
-    try: () =>
-      (options?.sdk ?? defaultSdk).listModels({
+    try: () => {
+      const apiKey = environment.FACTORY_API_KEY?.trim() || undefined;
+      return (options?.sdk ?? defaultSdk).listModels({
         cwd: NodeOS.tmpdir(),
         execPath: settings.binaryPath,
         env: compactEnvironment(environment),
-      }),
+        ...(apiKey ? { apiKey } : {}),
+      });
+    },
     catch: (cause) =>
       new DroidModelDiscoveryError({
         message: cause instanceof Error ? cause.message : "Failed to discover Droid models.",
@@ -285,14 +291,22 @@ export function checkDroidProviderStatus(
             Effect.result,
           )
         : Result.succeed(Option.none<ReadonlyArray<ServerProviderModel>>());
+    // Older Droid CLIs can run sessions without exposing the optional model-list RPC.
+    // The docs catalog below keeps those installations usable without a false warning.
+    const modelDiscoveryUnsupported =
+      commandResult.code === 0 &&
+      Result.isFailure(discoveredModels) &&
+      isUnsupportedDroidModelDiscoveryError(discoveredModels.failure);
     const modelDiscoveryFailed =
       commandResult.code === 0 &&
+      !modelDiscoveryUnsupported &&
       (Result.isFailure(discoveredModels) || Option.isNone(discoveredModels.success));
-    const discoveryMessage = Result.isFailure(discoveredModels)
-      ? discoveredModels.failure.message
-      : modelDiscoveryFailed
-        ? "Timed out while discovering Droid models."
-        : undefined;
+    const discoveryMessage =
+      !modelDiscoveryUnsupported && Result.isFailure(discoveredModels)
+        ? discoveredModels.failure.message
+        : modelDiscoveryFailed
+          ? "Timed out while discovering Droid models."
+          : undefined;
     const models =
       Result.isSuccess(discoveredModels) && Option.isSome(discoveredModels.success)
         ? modelsWithSettingsFallback(discoveredModels.success.value, settings)

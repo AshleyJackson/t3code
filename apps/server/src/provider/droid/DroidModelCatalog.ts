@@ -60,6 +60,8 @@ export function parseFactoryModelsMarkdown(markdown: string): ReadonlyArray<Serv
       const heading = line
         .slice("## ".length)
         .replace(/!\[[^\]]*\]\([^)]*\)/gu, "")
+        .replace(/<img\b[^>]*>/giu, "")
+        .replace(/<[^>]+>/gu, "")
         .trim();
       // Unknown sections (e.g. "Custom models") contribute no catalog entries.
       subProvider = SECTION_SUB_PROVIDERS[heading];
@@ -77,7 +79,7 @@ export function parseFactoryModelsMarkdown(markdown: string): ReadonlyArray<Serv
     if (!idMatch) continue;
 
     const slug = idMatch[1]!;
-    const rawName = cells[0] ?? "";
+    const rawName = (cells[0] ?? "").replace(/<[^>]+>/gu, "");
     if (seen.has(slug) || DEPRECATED_MARKER_PATTERN.test(rawName)) continue;
 
     const name = rawName.replace(FOOTNOTE_MARKER_PATTERN, "").trim();

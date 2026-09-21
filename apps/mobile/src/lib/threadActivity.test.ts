@@ -517,6 +517,41 @@ describe("buildThreadFeed", () => {
     expect(row?.getCopyText()).toBe(`Command run\n${command}`);
   });
 
+  it("removes terminal control sequences from legacy command details", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-ansi-command"),
+      projectId: ProjectId.make("project-1"),
+      title: "ANSI command",
+      activities: [
+        makeActivity({
+          id: EventId.make("ansi-command"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Command run",
+          createdAt: "2026-09-01T00:00:00.000Z",
+          payload: {
+            itemType: "command_execution",
+            title: "Command run",
+            detail: "\u001b[1mRUN\u001b[0m\r\n\u001b[46mtests passed\u001b[49m",
+            data: {
+              command: "git status",
+              kind: "execute",
+              rawOutput: { content: "\u001b[1mRUN\u001b[0m\r\n\u001b[46mtests passed\u001b[49m" },
+            },
+          },
+        }),
+      ],
+    });
+
+    const [group] = buildThreadFeed(thread);
+    expect(group?.type).toBe("activity-group");
+    if (group?.type !== "activity-group") return;
+    const [row] = group.activities;
+    expect(row?.detail).toBe("git status");
+    expect(row?.getFullDetail()).toBe("git status\n\nRUN\r\ntests passed");
+    expect(row?.getFullDetail()).not.toContain("\u001b");
+  });
+
   it("keeps command output when it equals the displayed command", () => {
     const command = "printf hello";
     const thread = makeThread({

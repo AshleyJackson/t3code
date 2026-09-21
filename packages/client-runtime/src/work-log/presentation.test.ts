@@ -423,6 +423,14 @@ describe("browser group summaries", () => {
 });
 
 describe("command work-log details", () => {
+  it("removes terminal control sequences from command output", () => {
+    expect(
+      extractCommandOutputText({
+        result: "\u001b[1mRUN\u001b[0m\r\n\u001b[46mtests passed\u001b[49m",
+      }),
+    ).toBe("RUN\r\ntests passed");
+  });
+
   it("extracts Claude result blocks and projected output", () => {
     expect(
       extractCommandOutputText({

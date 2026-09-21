@@ -10,6 +10,7 @@ import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-im
 import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import { stripTerminalControl } from "@t3tools/shared/terminalOutput";
 
 /**
  * Activities the worktree setup card already represents. The settled record
@@ -226,7 +227,9 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
+  if (typeof value !== "string") return null;
+  const sanitized = stripTerminalControl(value);
+  return sanitized.trim().length > 0 ? sanitized : null;
 }
 
 function commandResultContent(value: unknown): string | null {

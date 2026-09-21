@@ -19,6 +19,22 @@ function makeCommandActivity(
 }
 
 describe("deriveWorkLogEntries command output", () => {
+  it("removes terminal control sequences from legacy activity details", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeCommandActivity("ansi-detail", {
+        itemType: "command_execution",
+        title: "Ran command",
+        detail: "\u001b[1mRUN\u001b[0m\r\n\u001b[46mtests passed\u001b[49m",
+        data: { kind: "execute", command: "git status" },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      command: "git status",
+      detail: "RUN\r\ntests passed",
+    });
+  });
+
   it("uses Codex aggregated output instead of repeating the command", () => {
     const [entry] = deriveWorkLogEntries([
       makeCommandActivity("codex-command", {
