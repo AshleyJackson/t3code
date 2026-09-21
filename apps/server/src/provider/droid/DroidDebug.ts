@@ -6,7 +6,16 @@ import { join } from "node:path";
 type DebugRecord = Record<string, unknown>;
 
 const DROID_DEBUG_LOG_PATH = join(tmpdir(), "droid-test.log");
-let logInitialized = false;
+
+function initializeDroidDebugLog(): void {
+  try {
+    writeFileSync(DROID_DEBUG_LOG_PATH, "");
+  } catch {
+    process.stderr.write(`[droid-debug] Could not initialize ${DROID_DEBUG_LOG_PATH}\n`);
+  }
+}
+
+initializeDroidDebugLog();
 
 const isRecord = (value: unknown): value is DebugRecord =>
   typeof value === "object" && value !== null;
@@ -34,10 +43,6 @@ export function debugDroid(label: string, details: DebugRecord = {}): void {
   if (process.env.T3_DEBUG_DROID === "0") return;
   const line = `[droid-debug] ${label} ${JSON.stringify(details)}\n`;
   try {
-    if (!logInitialized) {
-      writeFileSync(DROID_DEBUG_LOG_PATH, "");
-      logInitialized = true;
-    }
     appendFileSync(DROID_DEBUG_LOG_PATH, line, "utf8");
   } catch {
     process.stderr.write(`[droid-debug] Could not write ${DROID_DEBUG_LOG_PATH}\n`);

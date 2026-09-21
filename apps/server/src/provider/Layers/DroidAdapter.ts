@@ -85,7 +85,6 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       instanceId,
       enabled: settings.enabled,
       binaryPath: settings.binaryPath,
-      environmentKeys: Object.keys(env).toSorted(),
       hasApiKey: apiKey !== undefined,
     });
 
