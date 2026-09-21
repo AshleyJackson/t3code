@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
@@ -21,6 +22,7 @@ import {
 } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { makeDroidModelCatalog } from "../droid/DroidModelCatalog.ts";
 
 type TextGenerationService = TextGeneration["Service"];
 
@@ -51,6 +53,7 @@ export type DroidDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
+  | HttpClient.HttpClient
   | ServerConfig
   | ServerSettingsService;
 
@@ -82,7 +85,10 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         instanceId,
         environment: processEnv,
       });
-      const checkProvider = checkDroidProviderStatus(effectiveConfig, processEnv).pipe(
+      const catalog = yield* makeDroidModelCatalog;
+      const checkProvider = checkDroidProviderStatus(effectiveConfig, processEnv, {
+        catalog,
+      }).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
