@@ -76,7 +76,11 @@ import {
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
 import { ModelRow, ChoiceRow } from "./ThreadSettingsRows";
-import { RUNTIME_MODE_CHOICES, selectableChoices } from "./thread-settings-options";
+import {
+  normalizeRuntimeModeForProvider,
+  runtimeModeChoicesForProvider,
+  selectableChoices,
+} from "./thread-settings-options";
 import {
   canCommitPendingModel,
   favoritesFirst,
@@ -294,6 +298,7 @@ type ThreadSettingsSessionValue = {
   readonly favoritesLoaded: boolean;
   readonly toggleFavorite: (option: ModelOption) => void;
   readonly runtimeMode: RuntimeMode;
+  readonly runtimeModeChoices: ReturnType<typeof runtimeModeChoicesForProvider>;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
   readonly providerExpansionOverrides: ReadonlySet<string>;
@@ -354,6 +359,12 @@ function ThreadSettingsSessionProvider(
     () => new Set(),
   );
   const [pendingModel, setPendingModel] = useState<ModelOption | null>(null);
+  const runtimeSelection = pendingModel?.selection ?? props.selectedModel;
+  const runtimeProvider = props.providerGroups
+    .flatMap((group) => group.models)
+    .find((option) => option.selection.instanceId === runtimeSelection?.instanceId)?.providerDriver;
+  const runtimeMode = normalizeRuntimeModeForProvider(runtimeProvider, props.runtimeMode);
+  const runtimeModeChoices = runtimeModeChoicesForProvider(runtimeProvider);
 
   const isApplied = useCallback(
     (option: ModelOption) =>
@@ -449,7 +460,8 @@ function ThreadSettingsSessionProvider(
       environmentId: props.environmentId,
       providerInstanceId: props.providerInstanceId,
       providerGroups: props.providerGroups,
-      runtimeMode: props.runtimeMode,
+      runtimeMode,
+      runtimeModeChoices,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
       displayedDescriptors,
       favoriteKeys,
@@ -488,7 +500,8 @@ function ThreadSettingsSessionProvider(
       providerFilter,
       props.onUpdateRuntimeMode,
       props.providerGroups,
-      props.runtimeMode,
+      runtimeMode,
+      runtimeModeChoices,
       searchQuery,
       showLegacyToggle,
       toggleProvider,
@@ -734,7 +747,8 @@ function ThreadSettingsOptionsItem(props: {
             isLast
             label="Runtime"
             value={
-              RUNTIME_MODE_CHOICES.find((choice) => choice.mode === session.runtimeMode)?.label
+              session.runtimeModeChoices.find((choice) => choice.mode === session.runtimeMode)
+                ?.label
             }
             onPress={() => props.onOpenSubmenu({ kind: "runtime" })}
           />
@@ -943,7 +957,7 @@ function ThreadSettingsChoiceContent(props: {
   const submenuContent =
     props.submenu.kind === "runtime"
       ? {
-          rows: RUNTIME_MODE_CHOICES.map((choice) => ({
+          rows: session.runtimeModeChoices.map((choice) => ({
             id: choice.mode,
             label: choice.label,
             description: choice.description,

@@ -2,6 +2,8 @@ import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
+import { getRuntimeModeConfig, getRuntimeModeOptions } from "./runtimeModePresentation";
+
 import { useRightPanelStore } from "~/rightPanelStore";
 import { AttachmentFilePreview } from "../files/AttachmentFilePreview";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -1075,6 +1077,7 @@ function useRestingComposerControlsLayout(host: HTMLDivElement | null, useContro
 }
 
 const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
+  provider: ProviderDriverKind;
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
@@ -1083,6 +1086,8 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
 }) {
+  const runtimeModeConfig = getRuntimeModeConfig(props.provider);
+  const runtimeModeOptions = getRuntimeModeOptions(props.provider);
   const size = props.size ?? "sm";
   const composerFloatingLayerProps = useComposerMenuProps();
   const [open, setOpen] = useComposerMenuState(props.hidden);
@@ -4978,6 +4983,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       id: "mode",
       content: (
         <ComposerFooterModeControls
+          provider={selectedProvider}
           showInteractionModeToggle={planModeUiEnabled}
           interactionMode={interactionMode}
           runtimeMode={runtimeMode}

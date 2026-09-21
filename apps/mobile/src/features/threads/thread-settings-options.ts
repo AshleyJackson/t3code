@@ -1,4 +1,4 @@
-import type { ProviderOptionDescriptor, RuntimeMode } from "@t3tools/contracts";
+import type { ProviderDriverKind, ProviderOptionDescriptor, RuntimeMode } from "@t3tools/contracts";
 
 /**
  * Desktop-oriented effort keywords that don't belong in the phone picker.
@@ -9,11 +9,13 @@ import type { ProviderOptionDescriptor, RuntimeMode } from "@t3tools/contracts";
  */
 const HIDDEN_EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["ultracode"]);
 
-export const RUNTIME_MODE_CHOICES: ReadonlyArray<{
+export type RuntimeModeChoice = {
   readonly mode: RuntimeMode;
   readonly label: string;
   readonly description: string;
-}> = [
+};
+
+export const RUNTIME_MODE_CHOICES: ReadonlyArray<RuntimeModeChoice> = [
   {
     mode: "approval-required",
     label: "Supervised",
@@ -35,6 +37,49 @@ export const RUNTIME_MODE_CHOICES: ReadonlyArray<{
     description: "Allow commands and edits without prompts.",
   },
 ];
+
+const DROID_RUNTIME_MODE_CHOICES: ReadonlyArray<RuntimeModeChoice> = [
+  {
+    mode: "approval-required",
+    label: "Off",
+    description: "Droid asks before every action.",
+  },
+  {
+    mode: "auto-accept-edits",
+    label: "Low",
+    description: "Allow file edits and read-only commands.",
+  },
+  {
+    mode: "medium-access",
+    label: "Medium",
+    description: "Allow reversible commands.",
+  },
+  {
+    mode: "full-access",
+    label: "High",
+    description: "Allow all Droid actions without prompts.",
+  },
+];
+
+export function runtimeModeChoicesForProvider(
+  provider: ProviderDriverKind | string | undefined,
+): ReadonlyArray<RuntimeModeChoice> {
+  return provider === "droid" ? DROID_RUNTIME_MODE_CHOICES : RUNTIME_MODE_CHOICES;
+}
+
+export function normalizeRuntimeModeForProvider(
+  provider: ProviderDriverKind | string | undefined,
+  runtimeMode: RuntimeMode,
+): RuntimeMode {
+  if (provider === "droid") {
+    return DROID_RUNTIME_MODE_CHOICES.some((choice) => choice.mode === runtimeMode)
+      ? runtimeMode
+      : "auto-accept-edits";
+  }
+  return RUNTIME_MODE_CHOICES.some((choice) => choice.mode === runtimeMode)
+    ? runtimeMode
+    : "auto-accept-edits";
+}
 
 export function selectableChoices(
   descriptor: Extract<ProviderOptionDescriptor, { type: "select" }>,
