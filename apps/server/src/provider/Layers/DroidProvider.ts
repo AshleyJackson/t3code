@@ -1,10 +1,5 @@
 import * as NodeOS from "node:os";
-import {
-  type ListModelsOptions,
-  ModelProvider,
-  type ModelInfo,
-  ReasoningEffort,
-} from "@factory/droid-sdk";
+import { type ListModelsOptions, ModelProvider, type ModelInfo } from "@factory/droid-sdk";
 import { listModels } from "@factory/droid-sdk/node";
 import { type DroidSettings, type ServerProviderModel } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -14,6 +9,8 @@ import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelCapabilities } from "@t3tools/shared/model";
+import type { DroidModelCatalog } from "../droid/DroidModelCatalog.ts";
+import { REASONING_EFFORT_LABELS } from "../droid/DroidSdkMappings.ts";
 
 import {
   buildSelectOptionDescriptor,
@@ -33,18 +30,6 @@ const DROID_PRESENTATION = {
 } as const;
 const DROID_CLI_TIMEOUT_MS = 10_000;
 const DROID_MODEL_DISCOVERY_TIMEOUT_MS = 20_000;
-
-const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
-  [ReasoningEffort.None]: "None",
-  [ReasoningEffort.Dynamic]: "Dynamic",
-  [ReasoningEffort.Off]: "Off",
-  [ReasoningEffort.Minimal]: "Minimal",
-  [ReasoningEffort.Low]: "Low",
-  [ReasoningEffort.Medium]: "Medium",
-  [ReasoningEffort.High]: "High",
-  [ReasoningEffort.ExtraHigh]: "Extra High",
-  [ReasoningEffort.Max]: "Max",
-};
 
 const DROID_FALLBACK_MODEL_CAPABILITIES = createModelCapabilities({
   optionDescriptors: [
@@ -83,6 +68,8 @@ interface DroidProviderSdk {
 
 interface DroidProviderStatusOptions {
   readonly sdk?: DroidProviderSdk;
+  /** Docs-collected catalog used as the model source when SDK discovery is unavailable. */
+  readonly catalog?: DroidModelCatalog;
 }
 
 export class DroidModelDiscoveryError extends Data.TaggedError("DroidModelDiscoveryError")<{
@@ -228,7 +215,15 @@ export function checkDroidProviderStatus(
 ): Effect.Effect<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   return Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    const fallbackModels = modelsWithSettingsFallback([], settings);
+    // Only yielded on fallback paths; SDK discovery succeeding never collects the docs.
+    const catalogModels: Effect.Effect<ReadonlyArray<ServerProviderModel>> = options?.catalog
+      ? options.catalog.models.pipe(
+          Effect.orElseSucceed((): ReadonlyArray<ServerProviderModel> => []),
+        )
+      : Effect.succeed([]);
+    const fallbackModels = Effect.map(catalogModels, (models) =>
+      modelsWithSettingsFallback(models, settings),
+    );
 
     if (!settings.enabled) {
       return yield* makePendingDroidProvider(settings);
@@ -252,7 +247,7 @@ export function checkDroidProviderStatus(
         presentation: DROID_PRESENTATION,
         enabled: true,
         checkedAt,
-        models: fallbackModels,
+        models: yield* fallbackModels,
         probe: {
           installed: !missing,
           version: null,
@@ -270,7 +265,7 @@ export function checkDroidProviderStatus(
         presentation: DROID_PRESENTATION,
         enabled: true,
         checkedAt,
-        models: fallbackModels,
+        models: yield* fallbackModels,
         probe: {
           installed: true,
           version: null,
@@ -301,7 +296,7 @@ export function checkDroidProviderStatus(
     const models =
       Result.isSuccess(discoveredModels) && Option.isSome(discoveredModels.success)
         ? modelsWithSettingsFallback(discoveredModels.success.value, settings)
-        : fallbackModels;
+        : yield* fallbackModels;
 
     return buildServerProvider({
       presentation: DROID_PRESENTATION,
