@@ -5,6 +5,7 @@ import {
   resolveProjectScripts,
   setupProjectScript,
 } from "@t3tools/shared/projectScripts";
+import { stripTerminalControl } from "@t3tools/shared/terminalOutput";
 import * as NodeCrypto from "node:crypto";
 
 import * as Clock from "effect/Clock";
@@ -131,20 +132,6 @@ function completionSentinel(token: string): string {
 
 function completionSentinelPattern(token: string): RegExp {
   return new RegExp(`${COMPLETION_SENTINEL_PREFIX}_${token}:(-?\\d+)`);
-}
-
-/** Removes ANSI escape sequences and cursor controls so lines can be shown as plain text. */
-function stripTerminalControl(text: string): string {
-  return (
-    text
-      .replace(
-        // eslint-disable-next-line no-control-regex
-        /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>]/g,
-        "",
-      )
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
-  );
 }
 
 type CompletionShell = "posix" | "fish" | "powershell";

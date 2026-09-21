@@ -54,6 +54,7 @@ import {
   toReasoningEffort,
   toRequestType,
 } from "../droid/DroidSdkMappings.ts";
+import { debugDroid, debugDroidRuntimeEvent, debugDroidSdkMessage } from "../droid/DroidDebug.ts";
 
 export type { DroidAdapterOptions } from "../droid/DroidAdapterTypes.ts";
 
@@ -70,12 +71,23 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    const apiKey = env.FACTORY_API_KEY?.trim() || undefined;
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = Effect.runPromiseWith(runtimeContext);
     const emit = (event: ProviderRuntimeEvent) =>
       Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
-    const emitNow = (event: ProviderRuntimeEvent) => runPromise(emit(event));
+    const emitNow = (event: ProviderRuntimeEvent) => {
+      debugDroidRuntimeEvent(event);
+      return runPromise(emit(event));
+    };
     const eventBase = makeDroidEventBase(instanceId);
+    debugDroid("adapter.created", {
+      instanceId,
+      enabled: settings.enabled,
+      binaryPath: settings.binaryPath,
+      environmentKeys: Object.keys(env).toSorted(),
+      hasApiKey: apiKey !== undefined,
+    });
 
     const settlePendingInteractions = (context: DroidContext) =>
       Effect.gen(function* () {
@@ -213,9 +225,19 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
         const commonOptions = {
           execPath: settings.binaryPath,
           env,
+          ...(apiKey ? { apiKey } : {}),
           permissionHandler,
           askUserHandler,
         };
+        debugDroid("session.create.begin", {
+          threadId: input.threadId,
+          resume: typeof input.resumeCursor === "string",
+          cwd: input.cwd,
+          modelId,
+          reasoningEffort,
+          runtimeMode: input.runtimeMode,
+          hasApiKey: apiKey !== undefined,
+        });
         const droid = yield* Effect.tryPromise({
           try: async () => {
             if (typeof input.resumeCursor === "string") {
@@ -244,6 +266,11 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               cause,
             }),
         });
+        debugDroid("session.create.success", {
+          threadId: input.threadId,
+          droidSessionId: droid.id,
+          resumed: typeof input.resumeCursor === "string",
+        });
 
         const session: ProviderSession = {
           provider: DROID_PROVIDER,
@@ -268,6 +295,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           activeThinkingItems: new Map(),
           activeCompletedAssistantItems: new Set(),
           activeCompletedThinkingItems: new Set(),
+          activeStartedToolIds: new Set(),
           activeTurnError: undefined,
           activeTurnState: undefined,
           activeTokenUsage: undefined,
@@ -292,6 +320,13 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
     );
 
     const sendTurn: DroidAdapterShape["sendTurn"] = Effect.fn("sendDroidTurn")(function* (input) {
+      debugDroid("turn.requested", {
+        threadId: input.threadId,
+        inputLength: input.input?.length ?? 0,
+        attachmentCount: input.attachments?.length ?? 0,
+        model: input.modelSelection?.model,
+        interactionMode: input.interactionMode,
+      });
       const context = sessions.get(input.threadId);
       if (!context) {
         return yield* new ProviderAdapterValidationError({
@@ -328,6 +363,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       context.activeThinkingItems = new Map();
       context.activeCompletedAssistantItems = new Set();
       context.activeCompletedThinkingItems = new Set();
+      context.activeStartedToolIds = new Set();
       context.activeTurnError = undefined;
       context.activeTurnState = undefined;
       context.activeTokenUsage = undefined;
@@ -348,6 +384,11 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
 
       yield* Effect.promise(async () => {
         try {
+          debugDroid("turn.worker.started", {
+            threadId: input.threadId,
+            turnId,
+            droidSessionId: context.droid.id,
+          });
           const modelId = toModelId(input.modelSelection?.model);
           const reasoningEffort = toReasoningEffort(
             getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort"),
@@ -369,6 +410,14 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               ? { interactionMode: DroidInteractionMode.Spec }
               : { interactionMode: DroidInteractionMode.Auto }),
           });
+          debugDroid("turn.stream.begin", {
+            threadId: input.threadId,
+            turnId,
+            modelId,
+            reasoningEffort,
+            autonomyLevel,
+            hasImages: images.length > 0,
+          });
 
           const messageOptions: MessageOptions & { includePartialMessages: true } = {
             abortSignal: abort.signal,
@@ -379,8 +428,18 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             text || "Please respond to the attached image.",
             messageOptions,
           )) {
+            debugDroidSdkMessage(message);
             await handleDroidMessage({ context, turnId, message, eventBase, emitNow });
           }
+          debugDroid("turn.stream.ended", {
+            threadId: input.threadId,
+            turnId,
+            activeTurnState: context.activeTurnState,
+            activeTurnError: context.activeTurnError,
+            assistantItemCount: context.activeAssistantItems.size,
+            thinkingItemCount: context.activeThinkingItems.size,
+            startedToolCount: context.activeStartedToolIds.size,
+          });
 
           if (context.activeTurnState === "interrupted" || abort.signal.aborted) {
             context.activeAbort = undefined;
@@ -438,6 +497,12 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             },
           });
         } catch (cause) {
+          debugDroid("turn.worker.failed", {
+            threadId: input.threadId,
+            turnId,
+            aborted: abort.signal.aborted,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
           if (abort.signal.aborted) {
             context.activeAbort = undefined;
             updateDroidContextSession(context, { status: "ready", activeTurnId: undefined });

@@ -11,6 +11,7 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import { DROID_PROVIDER, type DroidContext } from "./DroidAdapterTypes.ts";
+import { debugDroid } from "./DroidDebug.ts";
 import { contentBlockText, toTokenUsageSnapshot, toToolItemType } from "./DroidSdkMappings.ts";
 
 export const nowIso = () => DateTime.formatIso(DateTime.nowUnsafe());
@@ -51,6 +52,7 @@ export function makeDroidEventBase(instanceId: ProviderInstanceId) {
 }
 
 type DroidEventBase = ReturnType<typeof makeDroidEventBase>;
+type DroidEvent = ReturnType<DroidEventBase>;
 
 function usageSnapshot(
   usage: TokenUsage | TokenUsageUpdate,
@@ -61,6 +63,40 @@ function usageSnapshot(
 
 function detailText(value: string | readonly unknown[]): string {
   return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+async function ensureDroidToolStarted(input: {
+  readonly context: DroidContext;
+  readonly toolUseId: string;
+  readonly toolName: string;
+  readonly data?: unknown;
+  readonly source: string;
+  readonly base: (itemId?: string) => DroidEvent;
+  readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
+}) {
+  const { context, toolUseId, toolName, data, source, base, emitNow } = input;
+  const alreadyStarted = context.activeStartedToolIds.has(toolUseId);
+  debugDroid("tool.lifecycle.ensure_start", {
+    toolUseId,
+    toolName,
+    source,
+    alreadyStarted,
+    startedToolCount: context.activeStartedToolIds.size,
+  });
+  if (alreadyStarted) return false;
+
+  await emitNow({
+    ...base(toolUseId),
+    type: "item.started",
+    payload: {
+      itemType: toToolItemType(toolName),
+      status: "inProgress",
+      ...(toolName ? { title: toolName } : {}),
+      ...(data !== undefined ? { data } : {}),
+    },
+  });
+  context.activeStartedToolIds.add(toolUseId);
+  return true;
 }
 
 export async function handleDroidMessage(input: {
@@ -149,38 +185,57 @@ export async function handleDroidMessage(input: {
         activeItems.set(itemId, text);
       }
 
-      const firstTextIndex = message.message.content.findIndex((block) => block.type === "text");
-      const completedItemId =
-        firstTextIndex >= 0 ? `${message.message.id}-${firstTextIndex}` : message.message.id;
-      if (context.activeCompletedAssistantItems.has(completedItemId)) return;
-      context.activeCompletedAssistantItems.add(completedItemId);
+      const firstTextIndex = message.message.content.findIndex(
+        (block) => block.type === "text" && contentBlockText(block).length > 0,
+      );
       const firstTextBlock =
         firstTextIndex >= 0 ? message.message.content[firstTextIndex] : undefined;
+      if (firstTextIndex < 0 || !firstTextBlock) {
+        debugDroid("assistant.message.no_text", {
+          messageId: message.message.id,
+          contentTypes: message.message.content.map((block) => block.type),
+          topLevelTextLength: message.text.length,
+        });
+        return;
+      }
+      const completedItemId = `${message.message.id}-${firstTextIndex}`;
+      if (context.activeCompletedAssistantItems.has(completedItemId)) return;
+      context.activeCompletedAssistantItems.add(completedItemId);
       return emitNow({
         ...base(completedItemId),
         type: "item.completed",
         payload: {
           itemType: "assistant_message",
           status: "completed",
-          ...(firstTextBlock ? { detail: contentBlockText(firstTextBlock) } : {}),
+          detail: contentBlockText(firstTextBlock),
         },
       });
     }
     case "tool_call": {
-      return emitNow({
-        ...base(message.toolUseId),
-        type: "item.started",
-        payload: {
-          itemType: toToolItemType(message.name),
-          status: "inProgress",
-          title: message.name,
-          data: message.input,
-        },
+      await ensureDroidToolStarted({
+        context,
+        toolUseId: message.toolUseId,
+        toolName: message.name,
+        data: message.input,
+        source: "tool_call",
+        base,
+        emitNow,
       });
+      return;
     }
     case "tool_call_delta": {
+      const toolUseId = message.toolUse.id;
+      await ensureDroidToolStarted({
+        context,
+        toolUseId,
+        toolName: message.toolUse.name,
+        data: message.toolUse.input,
+        source: "tool_call_delta",
+        base,
+        emitNow,
+      });
       return emitNow({
-        ...base(message.toolUse.id),
+        ...base(toolUseId),
         type: "item.updated",
         payload: {
           itemType: toToolItemType(message.toolUse.name),
@@ -191,6 +246,14 @@ export async function handleDroidMessage(input: {
       });
     }
     case "tool_progress": {
+      await ensureDroidToolStarted({
+        context,
+        toolUseId: message.toolUseId,
+        toolName: message.toolName,
+        source: "tool_progress",
+        base,
+        emitNow,
+      });
       return emitNow({
         ...base(message.toolUseId),
         type: "item.updated",
@@ -204,6 +267,14 @@ export async function handleDroidMessage(input: {
       });
     }
     case "tool_result": {
+      await ensureDroidToolStarted({
+        context,
+        toolUseId: message.toolUseId,
+        toolName: message.toolName,
+        source: "tool_result",
+        base,
+        emitNow,
+      });
       return emitNow({
         ...base(message.toolUseId),
         type: "item.completed",

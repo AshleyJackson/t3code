@@ -20,6 +20,7 @@ import {
   type WorkLogToolLifecycleStatus,
 } from "@t3tools/client-runtime/work-log/presentation";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
+import { stripTerminalControl } from "@t3tools/shared/terminalOutput";
 import {
   isToolLifecycleItemType,
   type AssetResource,
@@ -556,16 +557,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     activity.kind === "task.started" ||
     activity.kind === "task.progress" ||
     activity.kind === "task.completed";
-  const taskSummary =
-    isTaskActivity && typeof payload?.summary === "string" && payload.summary.length > 0
-      ? payload.summary
-      : null;
+  const taskSummary = isTaskActivity ? asDisplayString(payload?.summary) : null;
   const taskDetailAsLabel =
-    isTaskActivity &&
-    !taskSummary &&
-    typeof payload?.detail === "string" &&
-    payload.detail.length > 0
-      ? payload.detail
+    isTaskActivity && !taskSummary && asDisplayString(payload?.detail) !== null
+      ? asDisplayString(payload?.detail)
       : null;
   const taskLabel = taskSummary || taskDetailAsLabel;
   const detail = isTaskActivity
@@ -573,7 +568,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       payload &&
       typeof payload.detail === "string" &&
       payload.detail.length > 0
-      ? stripTrailingExitCode(payload.detail).output
+      ? stripTrailingExitCode(stripTerminalControl(payload.detail)).output
       : null
     : extractToolDetail(payload, title ?? activity.summary);
   const toolCallId = isTaskActivity ? null : extractToolCallId(payload);
@@ -581,7 +576,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     id: activity.id,
     createdAt: activity.createdAt,
     turnId: activity.turnId,
-    label: taskLabel || activity.summary,
+    label: taskLabel || stripTerminalControl(activity.summary),
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -600,7 +595,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (detail) {
     entry.detail = detail;
   } else if (activity.kind === "runtime.error" || activity.kind === "runtime.warning") {
-    const message = asTrimmedString(payload?.message);
+    const message = asDisplayString(payload?.message);
     if (
       message &&
       normalizePreviewForComparison(message) !== normalizePreviewForComparison(activity.summary)
@@ -950,6 +945,13 @@ function asTrimmedString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function asDisplayString(value: unknown): string | null {
+  const text = asTrimmedString(value);
+  if (!text) return null;
+  const sanitized = stripTerminalControl(text).trim();
+  return sanitized.length > 0 ? sanitized : null;
+}
+
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -1116,7 +1118,7 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
   const itemResult = asRecord(item?.result);
   const itemInput = asRecord(item?.input);
   const itemType = asTrimmedString(payload?.itemType);
-  const detail = asTrimmedString(payload?.detail);
+  const detail = asDisplayString(payload?.detail);
   const candidates: unknown[] = [
     item?.command,
     itemInput?.command,
@@ -1143,7 +1145,7 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
 }
 
 function extractToolTitle(payload: Record<string, unknown> | null): string | null {
-  return asTrimmedString(payload?.title);
+  return asDisplayString(payload?.title);
 }
 
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {
@@ -1152,7 +1154,7 @@ function extractToolCallId(payload: Record<string, unknown> | null): string | nu
 }
 
 function normalizeInlinePreview(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+  return stripTerminalControl(value).replace(/\s+/g, " ").trim();
 }
 
 function truncateInlinePreview(value: string, maxLength = 84): string {
@@ -1235,7 +1237,7 @@ function extractToolDetail(
   payload: Record<string, unknown> | null,
   heading: string,
 ): string | null {
-  const rawDetail = asTrimmedString(payload?.detail);
+  const rawDetail = asDisplayString(payload?.detail);
   const detail = rawDetail ? stripTrailingExitCode(rawDetail).output : null;
   const normalizedHeading = normalizePreviewForComparison(heading);
   const normalizedDetail = normalizePreviewForComparison(detail);

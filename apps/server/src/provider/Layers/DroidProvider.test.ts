@@ -1,17 +1,19 @@
 import * as NodeOS from "node:os";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ModelProvider,
   ReasoningEffort,
   type ListModelsOptions,
   type ModelInfo,
 } from "@factory/droid-sdk";
-import { DroidSettings } from "@t3tools/contracts";
+import { DroidSettings, type ServerProviderModel } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { assert, it } from "@effect/vitest";
 
 import {
   buildDroidModelsFromSdkModels,
+  checkDroidProviderStatus,
   discoverDroidModels,
   makePendingDroidProvider,
 } from "./DroidProvider.ts";
@@ -105,13 +107,14 @@ it.effect("passes the configured executable and environment to SDK discovery", (
       binaryPath: "custom-droid",
     });
     let receivedOptions: ListModelsOptions & {
+      readonly apiKey?: string;
       readonly execPath?: string;
       readonly cwd?: string;
       readonly env?: Record<string, string>;
     } = {};
     const models = yield* discoverDroidModels(
       settings,
-      { DROID_TEST_ENV: "present" },
+      { DROID_TEST_ENV: "present", FACTORY_API_KEY: "test-api-key" },
       {
         sdk: {
           listModels: async (options) => {
@@ -129,5 +132,47 @@ it.effect("passes the configured executable and environment to SDK discovery", (
     assert.equal(receivedOptions.execPath, "custom-droid");
     assert.equal(receivedOptions.cwd, NodeOS.tmpdir());
     assert.equal(receivedOptions.env?.DROID_TEST_ENV, "present");
+    assert.equal(receivedOptions.env?.FACTORY_API_KEY, "test-api-key");
+    assert.equal(receivedOptions.apiKey, "test-api-key");
   }),
 );
+
+it.layer(NodeServices.layer)("checkDroidProviderStatus", (it) => {
+  it.effect("uses the catalog when the CLI lacks the model discovery RPC", () =>
+    Effect.gen(function* () {
+      const settings = decodeDroidSettings({
+        enabled: true,
+        binaryPath: process.execPath,
+      });
+      const catalogModels: ReadonlyArray<ServerProviderModel> = [
+        {
+          slug: "catalog-model",
+          name: "Catalog Model",
+          isCustom: false,
+          capabilities: null,
+        },
+      ];
+      const snapshot = yield* checkDroidProviderStatus(
+        settings,
+        {},
+        {
+          sdk: {
+            listModels: async () => {
+              throw new Error("Unknown method: droid.list_models");
+            },
+          },
+          catalog: {
+            models: Effect.succeed(catalogModels),
+          },
+        },
+      );
+
+      assert.equal(snapshot.status, "ready");
+      assert.equal(snapshot.message, undefined);
+      assert.deepStrictEqual(
+        snapshot.models.map((entry) => entry.slug),
+        ["catalog-model"],
+      );
+    }),
+  );
+});

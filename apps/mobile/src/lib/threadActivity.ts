@@ -15,6 +15,7 @@ import type {
   UserInputQuestion,
 } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import { stripTerminalControl } from "@t3tools/shared/terminalOutput";
 import {
   commandDetailRepeatsCommand,
   extractCommandOutputText,
@@ -490,17 +491,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     activity.kind === "task.progress" ||
     activity.kind === "task.completed" ||
     activity.kind === "task.updated";
-  const taskSummary =
-    isTaskActivity && typeof payload?.summary === "string" && payload.summary.length > 0
-      ? payload.summary
-      : null;
+  const taskSummary = isTaskActivity ? asDisplayString(payload?.summary) : null;
   const taskDetailAsLabel =
-    isTaskActivity &&
-    !taskSummary &&
-    !title &&
-    typeof payload?.detail === "string" &&
-    payload.detail.length > 0
-      ? payload.detail
+    isTaskActivity && !taskSummary && !title && asDisplayString(payload?.detail) !== null
+      ? asDisplayString(payload?.detail)
       : null;
   const taskLabel = taskSummary || taskDetailAsLabel;
   const taskId =
@@ -512,7 +506,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     createdAt: activity.createdAt,
     turnId: activity.turnId,
     ...(taskId ? { taskId } : {}),
-    label: taskLabel || activity.summary,
+    label: taskLabel || stripTerminalControl(activity.summary),
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -554,7 +548,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (!taskDetailAsLabel && output) {
     entry.detail = output;
   } else if (!taskDetailAsLabel && typeof payload?.detail === "string") {
-    const detail = stripTrailingExitCode(payload.detail).output;
+    const detail = stripTrailingExitCode(stripTerminalControl(payload.detail)).output;
     const data = asRecord(payload.data);
     const repeatsCommand =
       detail !== null &&
@@ -568,7 +562,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     if (detail && detail !== title && !repeatsCommand) entry.detail = detail;
   }
   if (isTaskActivity && typeof payload?.error === "string" && payload.error.trim()) {
-    entry.detail = payload.error;
+    entry.detail = stripTerminalControl(payload.error);
   }
   if (!entry.detail && (activity.kind === "runtime.error" || activity.kind === "runtime.warning")) {
     const message = asTrimmedString(payload?.message);
@@ -1213,6 +1207,13 @@ function asTrimmedString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function asDisplayString(value: unknown): string | null {
+  const text = asTrimmedString(value);
+  if (!text) return null;
+  const sanitized = stripTerminalControl(text).trim();
+  return sanitized.length > 0 ? sanitized : null;
+}
+
 function trimMatchingOuterQuotes(value: string): string {
   const trimmed = value.trim();
   if (
@@ -1402,14 +1403,14 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
 }
 
 function extractToolTitle(payload: Record<string, unknown> | null): string | null {
-  return asTrimmedString(payload?.title);
+  return asDisplayString(payload?.title);
 }
 
 function stripTrailingExitCode(value: string): {
   output: string | null;
   exitCode?: number | undefined;
 } {
-  const trimmed = value.trim();
+  const trimmed = stripTerminalControl(value).trim();
   const match = /^(?<output>[\s\S]*?)(?:\s*<exited with exit code (?<code>\d+)>)\s*$/i.exec(
     trimmed,
   );

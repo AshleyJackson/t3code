@@ -21,6 +21,25 @@ function activity(payload: Record<string, unknown>): OrchestrationThreadActivity
  * assertions are the tripwire.
  */
 describe("projectActivityPayload", () => {
+  it("removes terminal control sequences from displayed activity fields", () => {
+    const projected = projectActivityPayload({
+      ...activity({
+        itemType: "command_execution",
+        title: "\u001b[1mRan command\u001b[0m",
+        detail: "\u001b[46mRUN\u001b[49m",
+        data: { rawOutput: "\u001b[31mtests passed\u001b[39m" },
+      }),
+      summary: "\u001b[1mTool\u001b[0m",
+    });
+
+    expect(projected.summary).toBe("Tool");
+    expect(projected.payload).toMatchObject({
+      title: "Ran command",
+      detail: "RUN",
+      data: { rawOutput: { content: "tests passed" } },
+    });
+  });
+
   it("preserves tool attribution (agentId/parentToolUseId) through data slimming", () => {
     const projected = projectActivityPayload(
       activity({

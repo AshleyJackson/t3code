@@ -1,4 +1,5 @@
 import { projectQuestionToolInput } from "@t3tools/shared/toolActivity";
+import { stripTerminalControl } from "@t3tools/shared/terminalOutput";
 import type {
   OrchestrationEvent,
   OrchestrationThreadActivity,
@@ -19,6 +20,34 @@ function asTrimmedString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function sanitizeActivityDisplayText(activity: OrchestrationThreadActivity) {
+  const summary = stripTerminalControl(activity.summary);
+  const payload = asRecord(activity.payload);
+  let sanitizedPayload = payload;
+
+  if (payload) {
+    for (const key of ["title", "detail", "message", "summary", "error"]) {
+      const value = payload[key];
+      if (typeof value !== "string") continue;
+      const sanitized = stripTerminalControl(value);
+      if (sanitized === value) continue;
+      sanitizedPayload = sanitizedPayload === payload ? { ...payload } : sanitizedPayload;
+      if (sanitizedPayload) {
+        sanitizedPayload[key] = sanitized;
+      }
+    }
+  }
+
+  if (summary === activity.summary && sanitizedPayload === payload) {
+    return activity;
+  }
+  return {
+    ...activity,
+    summary,
+    ...(sanitizedPayload !== payload ? { payload: sanitizedPayload } : {}),
+  };
 }
 
 function pushChangedFile(target: string[], seen: Set<string>, value: unknown): void {
@@ -162,13 +191,14 @@ function projectViewedImagePath(data: Record<string, unknown>): string | undefin
 }
 
 function summarizeToolTextOutput(value: string): string | null {
+  const sanitizedValue = stripTerminalControl(value);
   let meaningfulLineCount = 0;
   let offset = 0;
 
-  while (offset <= value.length) {
-    const newlineIndex = value.indexOf("\n", offset);
-    const lineEnd = newlineIndex === -1 ? value.length : newlineIndex;
-    const line = value.slice(offset, lineEnd).replace(/\s+/g, " ").trim();
+  while (offset <= sanitizedValue.length) {
+    const newlineIndex = sanitizedValue.indexOf("\n", offset);
+    const lineEnd = newlineIndex === -1 ? sanitizedValue.length : newlineIndex;
+    const line = sanitizedValue.slice(offset, lineEnd).replace(/\s+/g, " ").trim();
     if (line.length > 0) {
       meaningfulLineCount += 1;
       if (line !== "```") {
@@ -425,10 +455,11 @@ function projectAcpContent(value: unknown): Record<string, unknown> | undefined 
 export function projectActivityPayload(
   activity: OrchestrationThreadActivity,
 ): OrchestrationThreadActivity {
-  const payload = asRecord(activity.payload);
+  const displayActivity = sanitizeActivityDisplayText(activity);
+  const payload = asRecord(displayActivity.payload);
   const data = asRecord(payload?.data);
   if (!payload || !data) {
-    return activity;
+    return displayActivity;
   }
 
   const itemStatus = asRecord(data.item)?.status;
@@ -444,7 +475,7 @@ export function projectActivityPayload(
 
   if (payload.itemType === "mcp_tool_call") {
     return {
-      ...activity,
+      ...displayActivity,
       payload: {
         ...projectedPayload,
         data: { ...projectMcpToolCallData(data), ...questionInput },
@@ -492,7 +523,7 @@ export function projectActivityPayload(
   }
 
   return {
-    ...activity,
+    ...displayActivity,
     payload: {
       ...projectedPayload,
       data: projectedData,

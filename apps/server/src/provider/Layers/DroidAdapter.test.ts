@@ -107,6 +107,10 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
       let createOptions: Record<string, unknown> | undefined;
       const adapter = yield* makeDroidAdapter(settings, {
         instanceId: ProviderInstanceId.make("droid"),
+        environment: {
+          DROID_TEST_ENV: "present",
+          FACTORY_API_KEY: "test-api-key",
+        },
         sdk: {
           createSession: async (options) => {
             createOptions = options as Record<string, unknown>;
@@ -174,6 +178,15 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
       });
 
       const events = yield* joinEvents(eventsFiber);
+      NodeAssert.equal(createOptions?.apiKey, "test-api-key");
+      NodeAssert.equal(
+        (createOptions?.env as Record<string, string> | undefined)?.DROID_TEST_ENV,
+        "present",
+      );
+      NodeAssert.equal(
+        (createOptions?.env as Record<string, string> | undefined)?.FACTORY_API_KEY,
+        "test-api-key",
+      );
       NodeAssert.equal(createOptions?.modelId, "model-1");
       NodeAssert.equal(createOptions?.autonomyLevel, AutonomyLevel.High);
       NodeAssert.equal(createOptions?.reasoningEffort, ReasoningEffort.High);
@@ -205,6 +218,107 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
           lastOutputTokens: 5,
           lastReasoningOutputTokens: 1,
         },
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("orders tool lifecycle events and ignores assistant messages without text", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-tool-order");
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "assistant",
+                message: {
+                  id: "tool-message",
+                  role: "assistant",
+                  content: [
+                    {
+                      type: "tool_use" as never,
+                      id: "tool-1",
+                      name: "Execute",
+                      input: { command: "pwd" },
+                    },
+                  ],
+                } as never,
+                text: "",
+              },
+              {
+                type: "tool_call_delta",
+                toolUse: {
+                  type: "tool_use" as never,
+                  id: "tool-1",
+                  name: "Execute",
+                  input: { command: "pwd" },
+                } as never,
+              },
+              {
+                type: "tool_call",
+                toolUseId: "tool-1",
+                name: "Execute",
+                input: { command: "pwd" },
+              },
+              {
+                type: "tool_result",
+                toolUseId: "tool-1",
+                toolName: "Execute",
+                content: "C:\\workspace",
+                isError: false,
+              },
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(7),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "run pwd", attachments: [] });
+
+      const events = yield* joinEvents(eventsFiber);
+      NodeAssert.equal(
+        events.filter(
+          (event) =>
+            event.type === "item.completed" && event.payload.itemType === "assistant_message",
+        ).length,
+        0,
+      );
+      const toolEvents = events.filter(
+        (event) =>
+          (event.type === "item.started" ||
+            event.type === "item.updated" ||
+            event.type === "item.completed") &&
+          String(event.itemId) === "tool-1",
+      );
+      NodeAssert.deepEqual(
+        toolEvents.map((event) => event.type),
+        ["item.started", "item.updated", "item.completed"],
       );
     }),
   ).pipe(Effect.provide(testLayer)),
