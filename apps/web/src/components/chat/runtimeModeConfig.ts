@@ -1,5 +1,12 @@
 import type { RuntimeMode } from "@t3tools/contracts";
-import { type LucideIcon, LockIcon, LockOpenIcon, PenLineIcon, SparklesIcon } from "lucide-react";
+import {
+  type LucideIcon,
+  LockIcon,
+  LockOpenIcon,
+  PenLineIcon,
+  ShieldIcon,
+  SparklesIcon,
+} from "lucide-react";
 
 export const runtimeModeConfig: Record<
   RuntimeMode,
@@ -20,6 +27,11 @@ export const runtimeModeConfig: Record<
     description: "Supported providers approve routine actions; others still ask.",
     icon: SparklesIcon,
   },
+  "medium-access": {
+    label: "Medium access",
+    description: "Allow reversible commands, ask before riskier actions.",
+    icon: ShieldIcon,
+  },
   "full-access": {
     label: "Full access",
     description: "Allow commands and edits without prompts.",
@@ -27,4 +39,9 @@ export const runtimeModeConfig: Record<
   },
 };
 
-export const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
+export const runtimeModeOptions: ReadonlyArray<RuntimeMode> = [
+  "approval-required",
+  "auto-accept-edits",
+  "auto",
+  "full-access",
+];

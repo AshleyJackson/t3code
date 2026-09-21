@@ -4,7 +4,13 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { DEFAULT_SERVER_SETTINGS, type ScopedProjectRef, type ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  ProviderDriverKind,
+  type RuntimeMode,
+  type ScopedProjectRef,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
@@ -33,7 +39,20 @@ import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
+import { normalizeRuntimeModeForProvider } from "../components/chat/runtimeModePresentation";
 import { useClientSettings } from "./useSettings";
+
+function resolveCarriedRuntimeMode(
+  raw: RuntimeMode | null,
+  destinationProvider: ProviderDriverKind | null | undefined,
+): RuntimeMode | null {
+  if (raw === null) return null;
+  return destinationProvider
+    ? normalizeRuntimeModeForProvider(destinationProvider, raw)
+    : raw === "medium-access"
+      ? "auto-accept-edits"
+      : raw;
+}
 
 interface NewThreadWorkspaceOptions {
   branch?: string | null;
@@ -118,6 +137,11 @@ export function useNewThreadHandler() {
         : null;
       const carryModelSelection =
         composerModelSelection ?? carrySourceShell?.modelSelection ?? null;
+      const carryRuntimeModeRaw =
+        carrySourceComposer?.runtimeMode ??
+        carrySourceShell?.runtimeMode ??
+        carrySourceDraft?.runtimeMode ??
+        null;
       const carryInteractionMode =
         carrySourceComposer?.interactionMode ??
         carrySourceShell?.interactionMode ??
@@ -137,6 +161,19 @@ export function useNewThreadHandler() {
       );
       const projectDefaultModelSelection = projectSettings.settings.defaultModelSelection;
       const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
+      const destinationInstanceId =
+        projectDefaultModelSelection?.instanceId ??
+        carryModelSelection?.instanceId ??
+        carrySourceShell?.session?.providerInstanceId ??
+        carrySourceShell?.modelSelection.instanceId ??
+        null;
+      const destinationProvider = destinationInstanceId
+        ? (targetServerSettings.providerInstances[destinationInstanceId]?.driver ??
+          (String(destinationInstanceId) === String(ProviderDriverKind.make("droid"))
+            ? ProviderDriverKind.make("droid")
+            : ProviderDriverKind.make("codex")))
+        : undefined;
+      const carryRuntimeMode = resolveCarriedRuntimeMode(carryRuntimeModeRaw, destinationProvider);
       const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
         resolveNewThreadModelSelectionOverride({
           projectDefaultSelection: projectDefaultModelSelection ?? null,
@@ -262,7 +299,11 @@ export function useNewThreadHandler() {
           if (workspaceContext) {
             setDraftThreadContext(emptyStoredDraftThread.draftId, {
               ...workspaceContext,
-              ...(!isDraftAlreadyOpen ? { runtimeMode: defaultRuntimeMode } : {}),
+              ...(carryRuntimeMode
+                ? { runtimeMode: carryRuntimeMode }
+                : !isDraftAlreadyOpen
+                  ? { runtimeMode: defaultRuntimeMode }
+                  : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             });
           }
@@ -299,7 +340,11 @@ export function useNewThreadHandler() {
             {
               threadId: emptyStoredDraftThread.threadId,
               ...workspaceContext,
-              ...(!isDraftAlreadyOpen ? { runtimeMode: defaultRuntimeMode } : {}),
+              ...(carryRuntimeMode
+                ? { runtimeMode: carryRuntimeMode }
+                : !isDraftAlreadyOpen
+                  ? { runtimeMode: defaultRuntimeMode }
+                  : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             },
           );
@@ -412,7 +457,7 @@ export function useNewThreadHandler() {
               envMode: initialEnvMode,
               newWorktreesStartFromOrigin: projectSettings.settings.newWorktreesStartFromOrigin,
             }),
-          runtimeMode: defaultRuntimeMode,
+          runtimeMode: carryRuntimeMode ?? defaultRuntimeMode,
           ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
         });
         applyStickyState(draftId);

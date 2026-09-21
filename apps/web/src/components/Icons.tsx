@@ -866,3 +866,10 @@ export const ComputerUseAppIcon: Icon = (props) => {
     </svg>
   );
 };
+export const DroidIcon: Icon = (props) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+    <path d="M7 9.5h10a2 2 0 0 1 2 2v5.25A2.25 2.25 0 0 1 16.75 19h-9.5A2.25 2.25 0 0 1 5 16.75V11.5a2 2 0 0 1 2-2Z" />
+    <path d="M8.5 9.5 7 6.75M15.5 9.5 17 6.75M9 13h.01M15 13h.01M9 16h6" strokeLinecap="round" />
+  </svg>
+);
+

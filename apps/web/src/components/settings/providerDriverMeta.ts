@@ -3,6 +3,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
+  DroidSettings,
   GrokSettings,
   OpenCodeSettings,
   ProviderDriverKind,
@@ -12,6 +13,7 @@ import {
   AntigravityIcon,
   ClaudeAI,
   CursorIcon,
+  DroidIcon,
   GrokIcon,
   type Icon,
   OpenAI,
@@ -81,6 +83,13 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     label: "Antigravity",
     icon: AntigravityIcon,
     settingsSchema: AntigravitySettings,
+  },
+  {
+    value: ProviderDriverKind.make("droid"),
+    label: "Droid",
+    icon: DroidIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: DroidSettings,
   },
 ];
 

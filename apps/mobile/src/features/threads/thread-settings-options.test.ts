@@ -1,7 +1,11 @@
 import type { ProviderOptionDescriptor } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { selectableChoices } from "./thread-settings-options";
+import {
+  normalizeRuntimeModeForProvider,
+  runtimeModeChoicesForProvider,
+  selectableChoices,
+} from "./thread-settings-options";
 
 const effortDescriptor: Extract<ProviderOptionDescriptor, { type: "select" }> = {
   id: "effort",
@@ -25,5 +29,21 @@ describe("selectableChoices", () => {
       "medium",
       "high",
     ]);
+  });
+});
+
+describe("runtime mode choices", () => {
+  it("uses Droid access levels when the selected provider is Droid", () => {
+    expect(runtimeModeChoicesForProvider("droid").map((choice) => choice.mode)).toEqual([
+      "approval-required",
+      "auto-accept-edits",
+      "medium-access",
+      "full-access",
+    ]);
+  });
+
+  it("normalizes provider-incompatible modes to a safe fallback", () => {
+    expect(normalizeRuntimeModeForProvider("droid", "auto")).toBe("auto-accept-edits");
+    expect(normalizeRuntimeModeForProvider("codex", "medium-access")).toBe("auto-accept-edits");
   });
 });

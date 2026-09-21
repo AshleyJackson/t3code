@@ -8,6 +8,7 @@ import {
 } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
+import { normalizeRuntimeModeForProvider } from "./chat/runtimeModePresentation";
 import { derivePendingRequests } from "@t3tools/client-runtime/pending-requests";
 import {
   questionAttachmentDraftId,
@@ -1941,7 +1942,6 @@ export default function ChatView(props: ChatViewProps) {
     .settings.defaultRuntimeMode;
   // Implicit drafts follow their current project/environment, including retargets.
   // Explicit composer choices and existing server threads retain their permissions.
-  const runtimeMode = composerRuntimeMode ?? activeServerThread?.runtimeMode ?? defaultRuntimeMode;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
@@ -2887,6 +2887,23 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
+  const rawRuntimeMode =
+    composerRuntimeMode ?? activeServerThread?.runtimeMode ?? defaultRuntimeMode;
+  const runtimeMode = normalizeRuntimeModeForProvider(selectedProvider, rawRuntimeMode);
+  useEffect(() => {
+    if (composerRuntimeMode === null || composerRuntimeMode === runtimeMode) return;
+    setComposerDraftRuntimeMode(composerDraftTarget, runtimeMode);
+    if (isLocalDraftThread) {
+      setDraftThreadContext(composerDraftTarget, { runtimeMode });
+    }
+  }, [
+    composerDraftTarget,
+    composerRuntimeMode,
+    isLocalDraftThread,
+    runtimeMode,
+    setComposerDraftRuntimeMode,
+    setDraftThreadContext,
+  ]);
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
   const { enabled: interactionModeEnabled, interactionMode } = resolveComposerInteractionMode({

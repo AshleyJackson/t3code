@@ -99,6 +99,7 @@ import {
 } from "./new-task-context-presentation";
 import { resolveEnvironmentProjectMatch } from "./new-task-project-selection";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
+import { normalizeRuntimeModeForProvider } from "./thread-settings-options";
 
 type WorkspaceMode = "local" | "worktree";
 
@@ -473,7 +474,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const defaultRuntimeMode = editingPendingTask
     ? (editingPendingTask.runtimeMode ?? DEFAULT_RUNTIME_MODE)
     : projectSettings.settings.defaultRuntimeMode;
-  const runtimeMode = selectedProjectDraft.runtimeMode ?? defaultRuntimeMode;
 
   // Antigravity keeps unavailable selections so sign-out or a catalog change
   // cannot switch the user's model. Other providers retain their fallback
@@ -530,6 +530,10 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         (provider) => provider.instanceId === selectedModel?.instanceId,
       ) ?? null,
     [selectedEnvironmentServerConfig, selectedModel?.instanceId],
+  );
+  const runtimeMode = normalizeRuntimeModeForProvider(
+    selectedProviderStatus?.driver,
+    selectedProjectDraft.runtimeMode ?? defaultRuntimeMode,
   );
   const planModeEnabled =
     legacyPlanModeEnabled && selectedProviderStatus?.showInteractionModeToggle !== false;
@@ -995,7 +999,12 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         attachments: draft.attachments,
         context: draft.context,
         modelSelection: draftModelSelection,
-        runtimeMode: draft.runtimeMode ?? defaultRuntimeMode,
+        runtimeMode: normalizeRuntimeModeForProvider(
+          selectedEnvironmentServerConfig?.providers.find(
+            (candidate) => candidate.instanceId === draftModelSelection.instanceId,
+          )?.driver,
+          draft.runtimeMode ?? defaultRuntimeMode,
+        ),
         interactionMode: resolvePendingTaskInteractionMode({
           preferenceLoaded: planModePreferenceLoaded,
           planModeEnabled: legacyPlanModeEnabled,
