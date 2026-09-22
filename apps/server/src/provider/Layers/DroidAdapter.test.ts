@@ -353,6 +353,17 @@ it.effect("maps Droid tool progress output and TodoWrite input to shared events"
                 type: "tool_progress",
                 toolUseId: "exec-1",
                 toolName: "Execute",
+                content: "",
+                update: {
+                  type: "status",
+                  status: "running",
+                  fullOutput: "",
+                },
+              },
+              {
+                type: "tool_progress",
+                toolUseId: "exec-1",
+                toolName: "Execute",
                 content: "hi",
                 update: {
                   type: "status",
@@ -421,6 +432,11 @@ it.effect("maps Droid tool progress output and TodoWrite input to shared events"
             event.payload.streamKind === "command_output" &&
             event.payload.delta === "hi",
         ),
+      );
+      NodeAssert.equal(
+        events.filter((event) => event.type === "item.updated" && String(event.itemId) === "exec-1")
+          .length,
+        1,
       );
     }),
   ).pipe(Effect.provide(testLayer)),

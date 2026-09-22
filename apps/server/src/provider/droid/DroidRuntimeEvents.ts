@@ -396,6 +396,13 @@ export async function handleDroidMessage(input: {
         (message.update.status ?? message.update.type === "error")
           ? (message.update.status ?? message.update.error ?? "Tool error")
           : undefined;
+      // Droid emits an initial progress tick with no content while a tool is
+      // starting. There is nothing useful to project from that tick, and
+      // emitting it creates an empty work-log row on mobile. Keep status/error
+      // updates because they still carry user-visible information.
+      if (!progressText && !summary) {
+        return;
+      }
       if (progressText) {
         await emitNow({
           ...base(message.toolUseId),
