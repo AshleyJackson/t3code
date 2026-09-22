@@ -37,6 +37,7 @@ import {
   type DroidContext,
 } from "../droid/DroidAdapterTypes.ts";
 import {
+  completeDroidContentItem,
   handleDroidMessage,
   makeDroidEventBase,
   nowIso,
@@ -293,8 +294,14 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           activeAssistantItems: new Map(),
           activeThinkingItems: new Map(),
           activeCompletedAssistantItems: new Set(),
+          activeCompletedAssistantContents: new Set(),
           activeCompletedThinkingItems: new Set(),
+          activeCompletedThinkingContents: new Set(),
           activeStartedToolIds: new Set(),
+          activeToolInputs: new Map(),
+          activeToolOutputs: new Map(),
+          activeToolInputFingerprints: new Map(),
+          activePlanFingerprint: undefined,
           activeTurnError: undefined,
           activeTurnState: undefined,
           activeTokenUsage: undefined,
@@ -361,8 +368,14 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       context.activeAssistantItems = new Map();
       context.activeThinkingItems = new Map();
       context.activeCompletedAssistantItems = new Set();
+      context.activeCompletedAssistantContents = new Set();
       context.activeCompletedThinkingItems = new Set();
+      context.activeCompletedThinkingContents = new Set();
       context.activeStartedToolIds = new Set();
+      context.activeToolInputs = new Map();
+      context.activeToolOutputs = new Map();
+      context.activeToolInputFingerprints = new Map();
+      context.activePlanFingerprint = undefined;
       context.activeTurnError = undefined;
       context.activeTurnState = undefined;
       context.activeTokenUsage = undefined;
@@ -470,7 +483,16 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           }
 
           for (const [itemId, detail] of context.activeAssistantItems) {
-            if (context.activeCompletedAssistantItems.has(itemId)) continue;
+            if (
+              !completeDroidContentItem(
+                context.activeCompletedAssistantItems,
+                context.activeCompletedAssistantContents,
+                itemId,
+                detail,
+              )
+            ) {
+              continue;
+            }
             await emitNow({
               ...eventBase(context, { turnId, itemId }),
               type: "item.completed",
@@ -478,7 +500,16 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             });
           }
           for (const [itemId, detail] of context.activeThinkingItems) {
-            if (context.activeCompletedThinkingItems.has(itemId)) continue;
+            if (
+              !completeDroidContentItem(
+                context.activeCompletedThinkingItems,
+                context.activeCompletedThinkingContents,
+                itemId,
+                detail,
+              )
+            ) {
+              continue;
+            }
             await emitNow({
               ...eventBase(context, { turnId, itemId }),
               type: "item.completed",

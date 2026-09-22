@@ -121,7 +121,7 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
               {
                 type: "assistant",
                 message: {
-                  id: "m1",
+                  id: "m2",
                   role: "assistant",
                   content: [{ type: "text" as never, text: "hello" }],
                 } as never,
@@ -288,7 +288,7 @@ it.effect("orders tool lifecycle events and ignores assistant messages without t
       });
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.threadId === threadId),
-        Stream.take(7),
+        Stream.take(6),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -318,7 +318,109 @@ it.effect("orders tool lifecycle events and ignores assistant messages without t
       );
       NodeAssert.deepEqual(
         toolEvents.map((event) => event.type),
-        ["item.started", "item.updated", "item.completed"],
+        ["item.started", "item.completed"],
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("maps Droid tool progress output and TodoWrite input to shared events", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-progress-plan");
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "tool_call",
+                toolUseId: "todo-1",
+                name: "TodoWrite",
+                input: {
+                  todos: [
+                    { content: "Inspect logs", status: "completed" },
+                    { content: "Implement mapping", status: "in_progress" },
+                  ],
+                },
+              },
+              {
+                type: "tool_call",
+                toolUseId: "exec-1",
+                name: "Execute",
+                input: { command: "echo hi" },
+              },
+              {
+                type: "tool_progress",
+                toolUseId: "exec-1",
+                toolName: "Execute",
+                content: "hi",
+                update: {
+                  type: "status",
+                  status: "running",
+                  fullOutput: "hi",
+                },
+              },
+              {
+                type: "tool_progress",
+                toolUseId: "exec-1",
+                toolName: "Execute",
+                content: "hi",
+                update: {
+                  type: "status",
+                  status: "running",
+                  fullOutput: "hi",
+                },
+              },
+              {
+                type: "tool_result",
+                toolUseId: "exec-1",
+                toolName: "Execute",
+                content: "hi",
+                isError: false,
+              },
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(9),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "work", attachments: [] });
+      const events = yield* joinEvents(eventsFiber);
+      const plan = events.find((event) => event.type === "turn.plan.updated");
+      NodeAssert.deepEqual(plan?.type === "turn.plan.updated" ? plan.payload.plan : [], [
+        { step: "Inspect logs", status: "completed" },
+        { step: "Implement mapping", status: "inProgress" },
+      ]);
+      NodeAssert.ok(
+        events.some(
+          (event) =>
+            event.type === "content.delta" &&
+            event.payload.streamKind === "command_output" &&
+            event.payload.delta === "hi",
+        ),
       );
     }),
   ).pipe(Effect.provide(testLayer)),
