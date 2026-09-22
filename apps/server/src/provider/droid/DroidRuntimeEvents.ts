@@ -17,6 +17,7 @@ import {
   droidProgressText,
   extractDroidPlan,
   isDroidPlanTool,
+  summarizeDroidToolResult,
   toTokenUsageSnapshot,
   toToolItemType,
 } from "./DroidSdkMappings.ts";
@@ -96,10 +97,6 @@ function usageSnapshot(
   context: DroidContext,
 ): ReturnType<typeof toTokenUsageSnapshot> {
   return toTokenUsageSnapshot(usage, context.activeTokenUsageBaseline);
-}
-
-function detailText(value: string | readonly unknown[]): string {
-  return typeof value === "string" ? value : JSON.stringify(value);
 }
 
 async function ensureDroidToolStarted(input: {
@@ -379,6 +376,7 @@ export async function handleDroidMessage(input: {
       if (progressText && context.activeToolOutputs.get(message.toolUseId) === progressText) {
         return;
       }
+      const progressSummary = summarizeDroidToolResult(message.toolName, progressText ?? "");
       const itemType = toToolItemType(message.toolName);
       if (progressText && (itemType === "command_execution" || itemType === "file_change")) {
         const delta = outputDelta(context, message.toolUseId, progressText);
@@ -405,7 +403,7 @@ export async function handleDroidMessage(input: {
           payload: {
             toolUseId: message.toolUseId,
             toolName: message.toolName,
-            ...(progressText ? { summary: progressText } : {}),
+            ...(progressText ? { summary: progressSummary.title ?? progressText } : {}),
           },
         });
       }
@@ -415,8 +413,12 @@ export async function handleDroidMessage(input: {
         payload: {
           itemType,
           status: "inProgress",
-          title: message.toolName,
-          ...(progressText ? { detail: progressText } : {}),
+          title: progressSummary.title ?? message.toolName,
+          ...(progressSummary.detail
+            ? { detail: progressSummary.detail }
+            : progressText && !progressSummary.title
+              ? { detail: progressText }
+              : {}),
           data: {
             ...message.update,
             ...(summary ? { summary } : {}),
@@ -436,14 +438,26 @@ export async function handleDroidMessage(input: {
         base,
         emitNow,
       });
+      const resultSummary = message.isError
+        ? {}
+        : summarizeDroidToolResult(message.toolName, message.content);
       return emitNow({
         ...base(message.toolUseId),
         type: "item.completed",
         payload: {
           itemType: toToolItemType(message.toolName),
           status: message.isError ? "failed" : "completed",
-          title: message.toolName,
-          detail: detailText(message.content),
+          title: resultSummary.title ?? message.toolName,
+          ...(message.isError
+            ? {
+                detail:
+                  typeof message.content === "string"
+                    ? message.content
+                    : JSON.stringify(message.content),
+              }
+            : resultSummary.detail
+              ? { detail: resultSummary.detail }
+              : {}),
           data: {
             input: context.activeToolInputs.get(message.toolUseId),
             output: message.content,

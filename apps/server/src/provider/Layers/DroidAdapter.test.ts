@@ -426,6 +426,143 @@ it.effect("maps Droid tool progress output and TodoWrite input to shared events"
   ).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("summarizes Skill results without exposing the activation document", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-skill-result");
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "tool_call",
+                toolUseId: "skill-1",
+                name: "Skill",
+                input: { name: "review" },
+              },
+              {
+                type: "tool_result",
+                toolUseId: "skill-1",
+                toolName: "Skill",
+                content: `Skill 'review' is now active.\n<skill name="review" filePath="builtin:review">You are a senior staff software engineer.</skill>`,
+                isError: false,
+              },
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "review this", attachments: [] });
+
+      const events = yield* joinEvents(eventsFiber);
+      const completed = events.find(
+        (event) => event.type === "item.completed" && String(event.itemId) === "skill-1",
+      );
+      NodeAssert.equal(completed?.type, "item.completed");
+      if (completed?.type === "item.completed") {
+        NodeAssert.equal(completed.payload.title, 'Skill "review" is now active.');
+        NodeAssert.equal("detail" in completed.payload, false);
+        NodeAssert.equal(
+          (completed.payload.data as { output?: string }).output?.startsWith("Skill 'review'"),
+          true,
+        );
+      }
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("summarizes structured file-change results by path", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-file-result");
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "tool_call",
+                toolUseId: "edit-1",
+                name: "Edit",
+                input: { file_path: "src/example.ts" },
+              },
+              {
+                type: "tool_result",
+                toolUseId: "edit-1",
+                toolName: "Edit",
+                content: JSON.stringify({
+                  success: true,
+                  files: [{ file_path: "C:\\workspace\\src\\example.ts" }],
+                }),
+                isError: false,
+              },
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "edit this", attachments: [] });
+
+      const events = yield* joinEvents(eventsFiber);
+      const completed = events.find(
+        (event) => event.type === "item.completed" && String(event.itemId) === "edit-1",
+      );
+      NodeAssert.equal(completed?.type, "item.completed");
+      if (completed?.type === "item.completed") {
+        NodeAssert.equal(completed.payload.title, "Changed files");
+        NodeAssert.equal(completed.payload.detail, "C:\\workspace\\src\\example.ts");
+      }
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("routes Droid permission requests through canonical approval events", () =>
   Effect.scoped(
     Effect.gen(function* () {
