@@ -112,6 +112,7 @@ export function toRequestType(params: RequestPermissionRequestParams): Canonical
 
 export function toToolItemType(toolName: string): ToolLifecycleItemType {
   const normalized = toolName.toLowerCase();
+  if (/(?:todo|plan)/u.test(normalized)) return "dynamic_tool_call";
   if (
     normalized.includes("exec") ||
     normalized.includes("bash") ||
@@ -126,6 +127,66 @@ export function toToolItemType(toolName: string): ToolLifecycleItemType {
   if (normalized.includes("web")) return "web_search";
   if (normalized.includes("image")) return "image_view";
   return "dynamic_tool_call";
+}
+
+export function isDroidPlanTool(toolName: string): boolean {
+  return /(?:todo|plan)/iu.test(toolName);
+}
+
+export type DroidPlanStep = {
+  readonly step: string;
+  readonly status: "pending" | "inProgress" | "completed";
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function asText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+export function extractDroidPlan(input: unknown): ReadonlyArray<DroidPlanStep> | undefined {
+  const record = asRecord(input);
+  const candidates = [record?.todos, record?.plan, record?.steps, record?.items];
+  const entries = candidates.find(Array.isArray);
+  if (!entries) return undefined;
+  const plan = entries
+    .map((entry) => {
+      const item = asRecord(entry);
+      const step = asText(item?.content ?? item?.step ?? item?.title ?? entry);
+      if (!step) return undefined;
+      const rawStatus = asText(item?.status)?.toLowerCase();
+      const status =
+        rawStatus === "completed" || rawStatus === "complete" || rawStatus === "done"
+          ? "completed"
+          : rawStatus === "in_progress" || rawStatus === "in-progress" || rawStatus === "active"
+            ? "inProgress"
+            : "pending";
+      return { step, status } satisfies DroidPlanStep;
+    })
+    .filter((entry): entry is DroidPlanStep => entry !== undefined);
+  return plan.length > 0 ? plan : undefined;
+}
+
+export function droidProgressText(
+  update: {
+    readonly details?: string | undefined;
+    readonly text?: string | undefined;
+    readonly fullOutput?: string | undefined;
+    readonly valueSnippet?: string | undefined;
+  },
+  fallback?: string,
+): string | undefined {
+  return (
+    asText(update.fullOutput) ??
+    asText(update.details) ??
+    asText(update.text) ??
+    asText(update.valueSnippet) ??
+    asText(fallback)
+  );
 }
 
 export function permissionDetail(params: RequestPermissionRequestParams): string {

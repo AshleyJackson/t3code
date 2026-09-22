@@ -84,6 +84,29 @@ export function debugDroidSdkMessage(message: unknown): void {
     }
   }
   if ("text" in message) details.textLength = stringLength(message.text);
+  const toolUse = isRecord(message.toolUse) ? message.toolUse : undefined;
+  if (toolUse) {
+    if (typeof toolUse.id === "string") details.toolUseId = toolUse.id;
+    if (typeof toolUse.name === "string") details.toolName = toolUse.name;
+    if (isRecord(toolUse.input)) details.toolInputKeys = Object.keys(toolUse.input);
+  }
+  const update = isRecord(message.update) ? message.update : undefined;
+  if (update) {
+    for (const key of ["type", "status", "toolName", "terminalId", "subagentSessionId"]) {
+      if (typeof update[key] === "string") details[`update.${key}`] = update[key];
+    }
+    for (const key of ["details", "text", "fullOutput", "valueSnippet", "error"]) {
+      const length = stringLength(update[key]);
+      if (length !== undefined) details[`update.${key}Length`] = length;
+    }
+    if (isRecord(update.parameters)) {
+      details.updateParameterKeys = Object.keys(update.parameters);
+    }
+  }
+  if ("content" in message) {
+    const length = stringLength(message.content);
+    if (length !== undefined) details.contentLength = length;
+  }
   if (isRecord(message.error)) details.errorKeys = Object.keys(message.error);
   debugDroid("sdk.message", details);
 }
