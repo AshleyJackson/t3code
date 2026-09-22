@@ -148,6 +148,62 @@ function asText(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function toolResultText(content: string | readonly unknown[]): string | undefined {
+  if (typeof content === "string") return asText(content);
+  return asText(
+    content
+      .map((entry) => (typeof entry === "string" ? entry : JSON.stringify(entry)))
+      .filter((entry): entry is string => entry !== undefined)
+      .join("\n"),
+  );
+}
+
+/**
+ * Droid returns the full activation document for Skill calls. Other providers
+ * keep tool results out of the lifecycle detail, so exposing that document
+ * makes the work log show implementation instructions instead of the action.
+ */
+export function summarizeDroidToolResult(
+  toolName: string,
+  content: string | readonly unknown[],
+): { readonly title?: string; readonly detail?: string } {
+  const text = toolResultText(content);
+  if (!text) return {};
+
+  if (/^skill$/iu.test(toolName.trim())) {
+    const skillName =
+      /skill\s+["']([^"']+)["']\s+is\s+now\s+active/iu.exec(text)?.[1] ??
+      /<skill\b[^>]*\bname=["']([^"']+)["']/iu.exec(text)?.[1];
+    return {
+      ...(skillName
+        ? { title: `Skill "${skillName}" is now active.` }
+        : { title: "Skill activated." }),
+    };
+  }
+
+  if (/(?:edit|write|patch)/iu.test(toolName.trim())) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      const files = asRecord(parsed)?.files;
+      if (Array.isArray(files)) {
+        const paths = files
+          .map((file) => asText(asRecord(file)?.file_path ?? asRecord(file)?.path))
+          .filter((path): path is string => path !== undefined);
+        if (paths.length > 0) {
+          return {
+            title: "Changed files",
+            detail: paths.join(", "),
+          };
+        }
+      }
+    } catch {
+      // Some Droid tools return plain text. Keep the generic result handling.
+    }
+  }
+
+  return {};
+}
+
 export function extractDroidPlan(input: unknown): ReadonlyArray<DroidPlanStep> | undefined {
   const record = asRecord(input);
   const candidates = [record?.todos, record?.plan, record?.steps, record?.items];
