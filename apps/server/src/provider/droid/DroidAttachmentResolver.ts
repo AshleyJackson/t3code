@@ -28,7 +28,7 @@ export function resolveDroidImages(
   },
 ) {
   return Effect.forEach(
-    attachments,
+    attachments.filter((attachment) => attachment.type === "image"),
     (attachment) =>
       Effect.gen(function* () {
         if (!isSupportedDroidImageMimeType(attachment.mimeType)) {
