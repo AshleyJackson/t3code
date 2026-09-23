@@ -13,6 +13,7 @@ import type { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeDroidAdapter } from "../Layers/DroidAdapter.ts";
 import { checkDroidProviderStatus, makePendingDroidProvider } from "../Layers/DroidProvider.ts";
+import { makeDroidTextGeneration } from "../droid/DroidTextGeneration.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -32,22 +33,6 @@ const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
   provider: DRIVER_KIND,
   packageName: null,
 });
-
-function makeUnsupportedTextGeneration(): TextGenerationService {
-  const fail = (operation: TextGenerationError["operation"]) =>
-    Effect.fail(
-      new TextGenerationError({
-        operation,
-        detail: "Droid SDK text generation is not enabled in this WIP.",
-      }),
-    );
-  return {
-    generateCommitMessage: () => fail("generateCommitMessage"),
-    generatePrContent: () => fail("generatePrContent"),
-    generateBranchName: () => fail("generateBranchName"),
-    generateThreadTitle: () => fail("generateThreadTitle"),
-  };
-}
 
 export type DroidDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
@@ -121,7 +106,10 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         enabled,
         snapshot,
         adapter,
-        textGeneration: makeUnsupportedTextGeneration(),
+        textGeneration: makeDroidTextGeneration({
+          settings: effectiveConfig,
+          environment: processEnv,
+        }),
       } satisfies ProviderInstance;
     }),
 };
