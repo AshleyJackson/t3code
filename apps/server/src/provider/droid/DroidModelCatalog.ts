@@ -16,6 +16,11 @@ const MODELS_DOC_URL = "https://docs.factory.ai/models.md";
 // collection to roughly once a day.
 const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 const CATALOG_FETCH_TIMEOUT_MS = 15_000;
+// The docs can publish a model before the bundled SDK accepts its model ID.
+// Do not expose those entries in the picker: createSession rejects them before
+// a Droid session exists, which otherwise surfaces only as a generic request
+// failure. Remove entries here when the SDK gains support.
+const UNSUPPORTED_DROID_MODEL_IDS = new Set(["gpt-6-luna"]);
 
 // Section headings on models.md mapped to the sub-provider label T3 Code groups models under.
 const SECTION_SUB_PROVIDERS: Readonly<Record<string, string>> = {
@@ -79,6 +84,7 @@ export function parseFactoryModelsMarkdown(markdown: string): ReadonlyArray<Serv
     if (!idMatch) continue;
 
     const slug = idMatch[1]!;
+    if (UNSUPPORTED_DROID_MODEL_IDS.has(slug)) continue;
     const rawName = (cells[0] ?? "").replace(/<[^>]+>/gu, "");
     if (seen.has(slug) || DEPRECATED_MARKER_PATTERN.test(rawName)) continue;
 

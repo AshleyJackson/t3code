@@ -20,6 +20,7 @@ const DOCS_MARKDOWN = [
   "",
   "| Model | Model ID | Multiplier | Reasoning |",
   "| --- | --- | --- | --- |",
+  "| GPT-6 Luna | `gpt-6-luna` | 1× | `high` (default) |",
   "| GLM-5.3 | `glm-5.3` | 0.56× | `low`, `high`, `max` (default) |",
   "| MiniMax M2.7<sup>‡</sup> | `minimax-m2.7` | 0.12× | `high` (default) |",
   "",
