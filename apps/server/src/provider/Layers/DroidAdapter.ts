@@ -258,13 +258,21 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               ...(reasoningEffort ? { reasoningEffort } : {}),
             });
           },
-          catch: (cause) =>
-            new ProviderAdapterRequestError({
+          catch: (cause) => {
+            const detail =
+              cause instanceof Error ? cause.message : "Failed to start Droid session.";
+            debugDroid("session.create.failed", {
+              threadId: input.threadId,
+              modelId,
+              detail,
+            });
+            return new ProviderAdapterRequestError({
               provider: DROID_PROVIDER,
               method: "createSession",
-              detail: cause instanceof Error ? cause.message : "Failed to start Droid session.",
+              detail,
               cause,
-            }),
+            });
+          },
         });
         debugDroid("session.create.success", {
           threadId: input.threadId,
