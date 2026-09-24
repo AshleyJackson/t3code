@@ -31,6 +31,21 @@ function assistantText(message: DroidStreamEvent): string | undefined {
     .join("");
 }
 
+export function collectDroidResponseText(messages: Iterable<DroidStreamEvent>): string {
+  let streamedText = "";
+  let resultText: string | undefined;
+  for (const message of messages) {
+    if (message.type === "result" && typeof message.text === "string") {
+      if (message.text.trim().length > 0) {
+        resultText = message.text;
+      }
+      continue;
+    }
+    streamedText += assistantText(message) ?? "";
+  }
+  return resultText ?? streamedText;
+}
+
 export function parseDroidThreadTitle(raw: string): {
   readonly title: string;
   readonly needsRefinement: boolean;
@@ -40,17 +55,35 @@ export function parseDroidThreadTitle(raw: string): {
     .replace(/^```(?:json)?\s*/iu, "")
     .replace(/\s*```$/u, "")
     .trim();
-  const parsed = JSON.parse(normalized) as {
-    readonly title?: unknown;
-    readonly needsRefinement?: unknown;
-  };
-  if (typeof parsed.title !== "string" || parsed.title.trim().length === 0) {
-    throw new Error("Droid returned a title response without a title.");
+  if (normalized.length === 0) {
+    throw new Error("Droid returned an empty title response.");
   }
-  return {
-    title: sanitizeThreadTitle(parsed.title),
-    needsRefinement: parsed.needsRefinement === true,
-  };
+
+  try {
+    const parsed = JSON.parse(normalized) as {
+      readonly title?: unknown;
+      readonly needsRefinement?: unknown;
+    };
+    if (typeof parsed.title === "string" && parsed.title.trim().length > 0) {
+      return {
+        title: sanitizeThreadTitle(parsed.title),
+        needsRefinement: parsed.needsRefinement === true,
+      };
+    }
+  } catch {
+    // Droid occasionally closes the stream before emitting the final JSON
+    // brace. Recover the completed title field when it is still present.
+  }
+
+  const titleField = normalized.match(/"title"\s*:\s*"((?:\\.|[^"\\])*)"/isu)?.[1];
+  if (titleField) {
+    const title = JSON.parse(`"${titleField}"`) as string;
+    if (title.trim().length > 0) {
+      return { title: sanitizeThreadTitle(title), needsRefinement: false };
+    }
+  }
+
+  throw new Error("Droid returned a title response without a usable title.");
 }
 
 function parseDroidJson(raw: string): Record<string, unknown> {
@@ -144,13 +177,13 @@ export function makeDroidTextGeneration(input: {
 
       return yield* Effect.tryPromise({
         try: async () => {
-          let output = "";
+          const messages: DroidStreamEvent[] = [];
           for await (const message of session.stream(prompt, {
             includePartialMessages: true,
           })) {
-            output += assistantText(message) ?? "";
+            messages.push(message);
           }
-          return parse(output);
+          return parse(collectDroidResponseText(messages));
         },
         catch: (cause) =>
           new TextGenerationError({

@@ -223,6 +223,47 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
   ).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("starts a fresh session when a resumed session rejects settings", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-resume-settings");
+      let createCalls = 0;
+      let closeCalls = 0;
+      const resumed = fakeSession([]);
+      resumed.updateSettings = async () => {
+        throw new Error("stale session settings");
+      };
+      resumed.close = async () => {
+        closeCalls += 1;
+      };
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => {
+            createCalls += 1;
+            return fakeSession([]);
+          },
+          resumeSession: async () => resumed,
+        },
+      });
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: createModelSelection(ProviderInstanceId.make("droid"), "grok-4.6", [
+          { id: "reasoningEffort", value: "high" },
+        ]),
+        resumeCursor: "stale-session",
+      });
+
+      NodeAssert.equal(createCalls, 1);
+      NodeAssert.equal(closeCalls, 1);
+      NodeAssert.equal(session.resumeCursor, "droid-test-session");
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("orders tool lifecycle events and ignores assistant messages without text", () =>
   Effect.scoped(
     Effect.gen(function* () {
