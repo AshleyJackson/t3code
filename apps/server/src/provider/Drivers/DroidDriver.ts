@@ -71,7 +71,6 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
       const adapter = yield* makeDroidAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
-        onModelBlacklisted: (modelId) => catalog.blacklistModel(modelId),
       });
       const checkProvider = checkDroidProviderStatus(effectiveConfig, processEnv, {
         catalog,

@@ -61,7 +61,6 @@ export interface DroidContext {
 export interface DroidAdapterOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
-  readonly onModelBlacklisted?: (modelId: string, reason: string) => void;
   readonly sdk?: {
     readonly createSession: (options?: CreateSessionOptions) => Promise<DroidSession>;
     readonly resumeSession: (
