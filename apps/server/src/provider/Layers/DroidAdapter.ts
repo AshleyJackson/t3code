@@ -55,7 +55,13 @@ import {
   toReasoningEffort,
   toRequestType,
 } from "../droid/DroidSdkMappings.ts";
-import { debugDroid, debugDroidRuntimeEvent, debugDroidSdkMessage } from "../droid/DroidDebug.ts";
+import {
+  debugDroid,
+  debugDroidRuntimeEvent,
+  debugDroidSdkMessage,
+  droidErrorDetails,
+  droidErrorMessage,
+} from "../droid/DroidDebug.ts";
 
 export type { DroidAdapterOptions } from "../droid/DroidAdapterTypes.ts";
 
@@ -256,7 +262,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
                 debugDroid("session.resume.settings.failed", {
                   threadId: input.threadId,
                   modelId,
-                  detail: cause instanceof Error ? cause.message : String(cause),
+                  ...droidErrorDetails(cause),
                 });
                 await resumed.close().catch(() => undefined);
                 return sdk.createSession({
@@ -279,12 +285,12 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             });
           },
           catch: (cause) => {
-            const detail =
-              cause instanceof Error ? cause.message : "Failed to start Droid session.";
+            const detail = droidErrorMessage(cause, "Failed to start Droid session.");
             debugDroid("session.create.failed", {
               threadId: input.threadId,
               modelId,
               detail,
+              ...droidErrorDetails(cause),
             });
             return new ProviderAdapterRequestError({
               provider: DROID_PROVIDER,
@@ -559,7 +565,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             threadId: input.threadId,
             turnId,
             aborted: abort.signal.aborted,
-            error: cause instanceof Error ? cause.message : String(cause),
+            ...droidErrorDetails(cause),
           });
           if (abort.signal.aborted) {
             context.activeAbort = undefined;
@@ -571,7 +577,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             });
             return;
           }
-          const message = cause instanceof Error ? cause.message : "Droid turn failed.";
+          const message = droidErrorMessage(cause, "Droid turn failed.");
           context.activeAbort = undefined;
           updateDroidContextSession(context, {
             status: "error",
