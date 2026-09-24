@@ -64,13 +64,14 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies DroidSettings;
-      const adapter = yield* makeDroidAdapter(effectiveConfig, {
-        instanceId,
-        environment: processEnv,
-      });
       const catalog = makeDroidModelCatalog({
         settings: effectiveConfig,
         environment: processEnv,
+      });
+      const adapter = yield* makeDroidAdapter(effectiveConfig, {
+        instanceId,
+        environment: processEnv,
+        onModelBlacklisted: (modelId) => catalog.blacklistModel(modelId),
       });
       const checkProvider = checkDroidProviderStatus(effectiveConfig, processEnv, {
         catalog,

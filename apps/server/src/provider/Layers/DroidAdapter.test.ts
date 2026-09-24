@@ -267,7 +267,11 @@ it.effect("starts a fresh session when a resumed session rejects settings", () =
 it.effect("surfaces SDK protocol metadata when session initialization fails", () =>
   Effect.scoped(
     Effect.gen(function* () {
+      let blacklistedModel: string | undefined;
       const adapter = yield* makeDroidAdapter(settings, {
+        onModelBlacklisted: (modelId) => {
+          blacklistedModel = modelId;
+        },
         sdk: {
           createSession: async () => {
             const error = new Error("Initialize session request failed") as Error & {
@@ -275,7 +279,7 @@ it.effect("surfaces SDK protocol metadata when session initialization fails", ()
             };
             error.metadata = {
               code: -32001,
-              message: "Model access denied",
+              message: "Model not allowed by organization policy",
               data: { message: "The selected model is not available for this account." },
             };
             throw error;
@@ -295,9 +299,10 @@ it.effect("surfaces SDK protocol metadata when session initialization fails", ()
         .pipe(Effect.flip);
 
       NodeAssert.equal(result._tag, "ProviderAdapterRequestError");
-      NodeAssert.match(result.detail, /Model access denied/u);
+      NodeAssert.match(result.detail, /Model not allowed by organization policy/u);
       NodeAssert.match(result.detail, /code -32001/u);
       NodeAssert.match(result.detail, /not available for this account/u);
+      NodeAssert.equal(blacklistedModel, "grok-4.6");
     }),
   ).pipe(Effect.provide(testLayer)),
 );
