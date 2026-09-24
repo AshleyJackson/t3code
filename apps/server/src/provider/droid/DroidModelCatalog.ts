@@ -127,6 +127,12 @@ export interface DroidModelCatalog {
   readonly models: Effect.Effect<ReadonlyArray<ServerProviderModel>, DroidModelCatalogError>;
 }
 
+interface DroidModelCatalogLogContext {
+  readonly instanceId?: string;
+  readonly displayName?: string;
+  readonly binaryPath?: string;
+}
+
 const fetchModelsDoc = Effect.fn("droidModelCatalog.fetch")(function* (
   client: HttpClient.HttpClient,
 ) {
@@ -137,47 +143,57 @@ const fetchModelsDoc = Effect.fn("droidModelCatalog.fetch")(function* (
   return parseFactoryModelsMarkdown(markdown);
 });
 
-export const makeDroidModelCatalog = Effect.gen(function* () {
-  const client = yield* HttpClient.HttpClient;
-  let cache: { fetchedAtMillis: number; models: ReadonlyArray<ServerProviderModel> } | undefined;
+export const makeDroidModelCatalog = (logContext: DroidModelCatalogLogContext = {}) =>
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    let cache: { fetchedAtMillis: number; models: ReadonlyArray<ServerProviderModel> } | undefined;
 
-  const models = Effect.gen(function* () {
-    const now = yield* Clock.currentTimeMillis;
-    if (cache !== undefined && now - cache.fetchedAtMillis < CATALOG_TTL_MS) {
-      return cache.models;
-    }
+    const models = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      if (cache !== undefined && now - cache.fetchedAtMillis < CATALOG_TTL_MS) {
+        debugDroid("model_catalog.docs.cache_hit", {
+          ...logContext,
+          cacheAgeMs: now - cache.fetchedAtMillis,
+          modelCount: cache.models.length,
+        });
+        return cache.models;
+      }
 
-    const fetched = yield* fetchModelsDoc(client).pipe(
-      Effect.timeoutOption(CATALOG_FETCH_TIMEOUT_MS),
-      Effect.result,
-    );
-    const fresh =
-      Result.isSuccess(fetched) &&
-      Option.isSome(fetched.success) &&
-      fetched.success.value.length > 0
-        ? fetched.success.value
-        : undefined;
-    if (Result.isSuccess(fetched) && Option.isSome(fetched.success)) {
-      debugDroid("model_catalog.docs.success", {
-        modelCount: fetched.success.value.length,
-        selectableModelCount: fresh?.length ?? 0,
-      });
-    } else if (Result.isFailure(fetched)) {
-      debugDroid("model_catalog.docs.failed", droidErrorDetails(fetched.failure));
-    } else {
-      debugDroid("model_catalog.docs.empty");
-    }
-    if (fresh === undefined) {
-      // A failed or empty refresh must not clobber the last good catalog.
-      if (cache !== undefined) return cache.models;
-      return yield* new DroidModelCatalogError({
-        message: "Failed to collect the Factory model catalog from docs.factory.ai.",
-      });
-    }
+      const fetched = yield* fetchModelsDoc(client).pipe(
+        Effect.timeoutOption(CATALOG_FETCH_TIMEOUT_MS),
+        Effect.result,
+      );
+      const fresh =
+        Result.isSuccess(fetched) &&
+        Option.isSome(fetched.success) &&
+        fetched.success.value.length > 0
+          ? fetched.success.value
+          : undefined;
+      if (Result.isSuccess(fetched) && Option.isSome(fetched.success)) {
+        debugDroid("model_catalog.docs.success", {
+          ...logContext,
+          modelCount: fetched.success.value.length,
+          selectableModelCount: fresh?.length ?? 0,
+        });
+      } else if (Result.isFailure(fetched)) {
+        debugDroid("model_catalog.docs.failed", {
+          ...logContext,
+          ...droidErrorDetails(fetched.failure),
+        });
+      } else {
+        debugDroid("model_catalog.docs.empty", logContext);
+      }
+      if (fresh === undefined) {
+        // A failed or empty refresh must not clobber the last good catalog.
+        if (cache !== undefined) return cache.models;
+        return yield* new DroidModelCatalogError({
+          message: "Failed to collect the Factory model catalog from docs.factory.ai.",
+        });
+      }
 
-    cache = { fetchedAtMillis: now, models: fresh };
-    return fresh;
+      cache = { fetchedAtMillis: now, models: fresh };
+      return fresh;
+    });
+
+    return { models } satisfies DroidModelCatalog;
   });
-
-  return { models } satisfies DroidModelCatalog;
-});

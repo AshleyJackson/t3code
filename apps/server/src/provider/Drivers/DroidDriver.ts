@@ -67,7 +67,11 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         instanceId,
         environment: processEnv,
       });
-      const catalog = yield* makeDroidModelCatalog;
+      const catalog = yield* makeDroidModelCatalog({
+        instanceId,
+        displayName,
+        binaryPath: effectiveConfig.binaryPath,
+      });
       const checkProvider = checkDroidProviderStatus(effectiveConfig, processEnv, {
         catalog,
       }).pipe(
