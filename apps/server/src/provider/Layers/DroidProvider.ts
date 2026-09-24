@@ -285,15 +285,21 @@ export function checkDroidProviderStatus(
             Effect.result,
           )
         : Result.succeed(Option.none<ReadonlyArray<ServerProviderModel>>());
+    const modelDiscoveryUnsupported =
+      Result.isFailure(discoveredModels) &&
+      /unknown method:\s*droid\.list_models/iu.test(discoveredModels.failure.message);
     const modelDiscoveryFailed =
       commandResult.code === 0 &&
+      !modelDiscoveryUnsupported &&
       (Result.isFailure(discoveredModels) ||
         (Result.isSuccess(discoveredModels) && Option.isNone(discoveredModels.success)));
-    const discoveryMessage = Result.isFailure(discoveredModels)
-      ? discoveredModels.failure.message
-      : modelDiscoveryFailed
-        ? "Timed out while discovering Droid models."
-        : undefined;
+    const discoveryMessage = modelDiscoveryUnsupported
+      ? undefined
+      : Result.isFailure(discoveredModels)
+        ? discoveredModels.failure.message
+        : modelDiscoveryFailed
+          ? "Timed out while discovering Droid models."
+          : undefined;
     const models =
       Result.isSuccess(discoveredModels) && Option.isSome(discoveredModels.success)
         ? modelsWithSettingsFallback(discoveredModels.success.value, settings)

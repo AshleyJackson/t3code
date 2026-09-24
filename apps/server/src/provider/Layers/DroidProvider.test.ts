@@ -205,4 +205,33 @@ it.layer(NodeServices.layer)("checkDroidProviderStatus", (it) => {
       );
     }),
   );
+
+  it.effect("keeps the provider ready when the installed Droid lacks model discovery", () =>
+    Effect.gen(function* () {
+      const settings = decodeDroidSettings({
+        enabled: true,
+        binaryPath: process.execPath,
+      });
+      const snapshot = yield* checkDroidProviderStatus(
+        settings,
+        {},
+        {
+          catalog: {
+            models: Effect.fail(
+              new DroidModelCatalogError({
+                message: "Unknown method: droid.list_models",
+              }),
+            ),
+          },
+        },
+      );
+
+      assert.equal(snapshot.status, "ready");
+      assert.equal(snapshot.message, undefined);
+      assert.deepStrictEqual(
+        snapshot.models.map((entry) => entry.slug),
+        ["default"],
+      );
+    }),
+  );
 });
