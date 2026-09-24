@@ -35,7 +35,8 @@ export interface PendingDroidUserInput {
 
 export interface DroidContext {
   session: ProviderSession;
-  readonly droid: DroidSession;
+  droid: DroidSession;
+  notificationCleanup: (() => void) | undefined;
   readonly pendingPermissions: Map<ApprovalRequestId, PendingDroidPermission>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingDroidUserInput>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
@@ -56,6 +57,10 @@ export interface DroidContext {
   activeTokenUsage: ThreadTokenUsageSnapshot | undefined;
   activeTokenUsageBaseline: ThreadTokenUsageSnapshot | undefined;
   cumulativeTokenUsage: ThreadTokenUsageSnapshot | undefined;
+  activeHookIds: Set<string>;
+  completedHookIds: Set<string>;
+  compactionInProgress: boolean;
+  pendingCompactionNotification: Record<string, unknown> | undefined;
 }
 
 export interface DroidAdapterOptions {

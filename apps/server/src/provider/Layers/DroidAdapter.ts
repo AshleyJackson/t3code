@@ -14,6 +14,7 @@ import {
   type DroidSettings,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type ProviderSendTurnInput,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -38,9 +39,11 @@ import {
 } from "../droid/DroidAdapterTypes.ts";
 import {
   completeDroidContentItem,
+  handleDroidNotification,
   handleDroidMessage,
   makeDroidEventBase,
   nowIso,
+  refreshDroidContextStats,
   updateDroidContextSession,
 } from "../droid/DroidRuntimeEvents.ts";
 import {
@@ -62,6 +65,10 @@ import {
   droidErrorDetails,
   droidErrorMessage,
 } from "../droid/DroidDebug.ts";
+import {
+  readMcpProviderSession,
+  withAgentDeviceEnvironment,
+} from "../../mcp/McpProviderSession.ts";
 
 export type { DroidAdapterOptions } from "../droid/DroidAdapterTypes.ts";
 
@@ -127,8 +134,60 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
     const closeContext = (context: DroidContext) =>
       Effect.gen(function* () {
         yield* abortContext(context);
+        context.notificationCleanup?.();
+        context.notificationCleanup = undefined;
         yield* Effect.tryPromise(() => context.droid.close()).pipe(Effect.ignore);
       });
+
+    const attachDroidNotifications = (context: DroidContext) => {
+      context.notificationCleanup?.();
+      context.notificationCleanup = undefined;
+      if (typeof context.droid.onNotification !== "function") return;
+      let acceptingNotifications = true;
+      let notificationChain = Promise.resolve();
+      const unsubscribe = context.droid.onNotification((notification) => {
+        const sourceDroid = context.droid;
+        const turnId = context.session.activeTurnId;
+        notificationChain = notificationChain
+          .then(async () => {
+            if (!acceptingNotifications || context.droid !== sourceDroid) return;
+            const params =
+              notification.params !== null &&
+              typeof notification.params === "object" &&
+              !Array.isArray(notification.params)
+                ? (notification.params as Record<string, unknown>)
+                : undefined;
+            const nestedNotification = params?.notification;
+            const payload: Record<string, unknown> =
+              nestedNotification !== null &&
+              typeof nestedNotification === "object" &&
+              !Array.isArray(nestedNotification)
+                ? (nestedNotification as Record<string, unknown>)
+                : params && typeof params.type === "string"
+                  ? params
+                  : (notification as Record<string, unknown>);
+            await handleDroidNotification({
+              context,
+              sourceDroid,
+              notification: payload,
+              turnId,
+              eventBase,
+              emitNow: (event) => (acceptingNotifications ? emitNow(event) : Promise.resolve()),
+            });
+          })
+          .catch((cause) => {
+            if (!acceptingNotifications) return;
+            debugDroid("notification.mapping.failed", {
+              threadId: context.session.threadId,
+              ...droidErrorDetails(cause),
+            });
+          });
+      });
+      context.notificationCleanup = () => {
+        acceptingNotifications = false;
+        unsubscribe();
+      };
+    };
 
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
@@ -228,10 +287,33 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
         const reasoningEffort = toReasoningEffort(
           getModelSelectionStringOptionValue(modelSelection, "reasoningEffort"),
         );
+        const mcpProviderSession = readMcpProviderSession(input.threadId);
+        const sessionEnvironment = Object.fromEntries(
+          Object.entries(withAgentDeviceEnvironment(env, mcpProviderSession)).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        );
         const commonOptions = {
           execPath: settings.binaryPath,
-          env,
+          env: sessionEnvironment,
           ...(apiKey ? { apiKey } : {}),
+          ...(mcpProviderSession
+            ? {
+                mcpServers: [
+                  {
+                    type: "http" as const,
+                    name: "t3-code",
+                    url: mcpProviderSession.endpoint,
+                    headers: [
+                      {
+                        name: "Authorization",
+                        value: mcpProviderSession.authorizationHeader,
+                      },
+                    ],
+                  },
+                ],
+              }
+            : {}),
           permissionHandler,
           askUserHandler,
         };
@@ -341,9 +423,16 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           activeTokenUsage: undefined,
           activeTokenUsageBaseline: undefined,
           cumulativeTokenUsage: undefined,
+          notificationCleanup: undefined,
+          activeHookIds: new Set(),
+          completedHookIds: new Set(),
+          compactionInProgress: false,
+          pendingCompactionNotification: undefined,
         };
         contextRef = context;
         sessions.set(input.threadId, context);
+        attachDroidNotifications(context);
+        const contextStats = yield* Effect.promise(() => refreshDroidContextStats(context));
 
         yield* emit({
           ...eventBase(context),
@@ -355,6 +444,19 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           type: "thread.started",
           payload: { providerThreadId: droid.id },
         });
+        if (contextStats) {
+          yield* emit({
+            ...eventBase(context, { raw: contextStats }),
+            type: "thread.token-usage.updated",
+            payload: {
+              usage: context.activeTokenUsage ?? {
+                usedTokens: Math.max(0, Math.round(contextStats.used)),
+                maxTokens: Math.max(1, Math.round(contextStats.limit)),
+                compactsAutomatically: true,
+              },
+            },
+          });
+        }
         return session;
       },
     );
@@ -414,6 +516,8 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       context.activeTurnState = undefined;
       context.activeTokenUsage = undefined;
       context.activeTokenUsageBaseline = context.cumulativeTokenUsage;
+      context.activeHookIds = new Set();
+      context.completedHookIds = new Set();
       context.turns.push({ id: turnId, items: [] });
       updateDroidContextSession(context, {
         status: "running",
@@ -613,9 +717,128 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
         });
       });
 
+    const compactThread = Effect.fn("compactDroidThread")(function* (
+      threadId: ThreadId,
+      requestedModelSelection?: ProviderSendTurnInput["modelSelection"],
+    ) {
+      const context = yield* requireSession(threadId);
+      if (context.session.status === "running" || context.session.activeTurnId) {
+        return yield* new ProviderAdapterValidationError({
+          provider: DROID_PROVIDER,
+          operation: "compactThread",
+          issue: "Droid cannot compact while a turn is running.",
+        });
+      }
+      if (context.compactionInProgress) {
+        return yield* new ProviderAdapterValidationError({
+          provider: DROID_PROVIDER,
+          operation: "compactThread",
+          issue: "Droid context compaction is already in progress.",
+        });
+      }
+      if (
+        requestedModelSelection !== undefined &&
+        requestedModelSelection.instanceId !== instanceId
+      ) {
+        return yield* new ProviderAdapterValidationError({
+          provider: DROID_PROVIDER,
+          operation: "compactThread",
+          issue: `Droid model selection is bound to instance '${requestedModelSelection.instanceId}', expected '${instanceId}'.`,
+        });
+      }
+
+      context.compactionInProgress = true;
+      context.pendingCompactionNotification = undefined;
+      const beforeTokens = context.cumulativeTokenUsage?.usedTokens;
+      const previousDroid = context.droid;
+      const modelId = toModelId(requestedModelSelection?.model);
+      const reasoningEffort = toReasoningEffort(
+        getModelSelectionStringOptionValue(requestedModelSelection, "reasoningEffort"),
+      );
+
+      const compactEffect = Effect.gen(function* () {
+        if (modelId || reasoningEffort) {
+          yield* Effect.tryPromise({
+            try: () =>
+              previousDroid.updateSettings({
+                ...(modelId ? { modelId } : {}),
+                ...(reasoningEffort ? { reasoningEffort } : {}),
+              }),
+            catch: (cause) =>
+              new ProviderAdapterRequestError({
+                provider: DROID_PROVIDER,
+                method: "updateSettings",
+                detail: droidErrorMessage(cause, "Failed to configure Droid before compaction."),
+                cause,
+              }),
+          });
+        }
+
+        const outcome = yield* Effect.tryPromise({
+          try: () => previousDroid.compact(),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: DROID_PROVIDER,
+              method: "compact",
+              detail: droidErrorMessage(cause, "Failed to compact Droid session."),
+              cause,
+            }),
+        });
+        context.droid = outcome.session;
+        context.session = {
+          ...context.session,
+          resumeCursor: outcome.session.id,
+          ...(requestedModelSelection?.model ? { model: requestedModelSelection.model } : {}),
+          status: "ready",
+          activeTurnId: undefined,
+          lastError: undefined,
+          updatedAt: nowIso(),
+        };
+        context.activeTurnState = undefined;
+        context.activeTurnError = undefined;
+        context.activeTokenUsageBaseline = undefined;
+        context.activeHookIds = new Set();
+        context.completedHookIds = new Set();
+        attachDroidNotifications(context);
+        yield* Effect.promise(() => previousDroid.close().catch(() => undefined));
+        const stats = yield* Effect.promise(() => refreshDroidContextStats(context));
+        const notification = context.pendingCompactionNotification;
+        context.pendingCompactionNotification = undefined;
+        yield* emit({
+          ...eventBase(context, {
+            raw: {
+              result: { removedCount: outcome.removedCount },
+              ...(notification ? { notification } : {}),
+            },
+          }),
+          type: "thread.state.changed",
+          payload: {
+            state: "compacted",
+            ...(beforeTokens !== undefined ? { beforeTokens } : {}),
+            ...(stats ? { afterTokens: Math.max(0, Math.round(stats.used)) } : {}),
+            detail: {
+              source: "droid.sdk",
+              removedCount: outcome.removedCount,
+              ...(notification ? { notification } : {}),
+            },
+          },
+        });
+      });
+
+      try {
+        const result = yield* Effect.result(compactEffect);
+        if (result._tag === "Failure") {
+          return yield* result.failure;
+        }
+      } finally {
+        context.compactionInProgress = false;
+      }
+    });
+
     return {
       provider: DROID_PROVIDER,
       capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: false },
+      compaction: { type: "native", start: compactThread },
       startSession,
       sendTurn,
       interruptTurn: (threadId) =>

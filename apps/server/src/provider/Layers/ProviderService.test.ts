@@ -1043,6 +1043,30 @@ declaredCompaction.layer("ProviderService declared compaction", (it) => {
     }),
   );
 
+  it.effect("persists the replacement cursor from declared native compaction", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("custom-native-compaction-cursor");
+      yield* provider.startSession(threadId, {
+        providerInstanceId: nativeCompactionInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      customNativeCompaction.updateSession(threadId, (session) => ({
+        ...session,
+        resumeCursor: { opaque: "compacted-resume" },
+      }));
+
+      yield* provider.compactThread(threadId);
+
+      const binding = yield* directory.getBinding(threadId);
+      assert(Option.isSome(binding));
+      assert.deepEqual(binding.value.resumeCursor, { opaque: "compacted-resume" });
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
   it.effect("sends the declared slash command as the compaction turn", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
@@ -1971,6 +1995,12 @@ routing.layer("ProviderServiceLive routing", (it) => {
         .compactThread(threadId)
         .pipe(Effect.result, Effect.forkChild);
       yield* advanceTestClock(50);
+      routing.codex.sendTurn.mockClear();
+      const sendDuringCompaction = yield* provider
+        .sendTurn({ threadId, input: "while compacting", attachments: [] })
+        .pipe(Effect.result);
+      assert.equal(sendDuringCompaction._tag, "Failure");
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
       const concurrent = yield* provider.compactThread(threadId).pipe(Effect.result);
       assert.equal(concurrent._tag, "Failure");
       assert.equal(routing.codex.compactThread.mock.calls.length, 1);

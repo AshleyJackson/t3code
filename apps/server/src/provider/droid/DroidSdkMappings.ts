@@ -3,6 +3,7 @@ import {
   type AskUserRequestParams,
   type AskUserResult,
   type ContentBlock,
+  type ContextStats,
   DroidInteractionMode,
   ReasoningEffort,
   ToolConfirmationOutcome,
@@ -155,6 +156,101 @@ function asText(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function parseDroidTodoText(input: string): ReadonlyArray<Record<string, unknown>> {
+  const lines = input
+    .trim()
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  return lines.map((line) => {
+    const statusMatch =
+      /^(?:(?:\d+[.)]\s*)|(?:[-*]\s+))?\[(completed|in_progress|pending|cancelled|canceled)\]\s*(.*)$/iu.exec(
+        line,
+      );
+    if (statusMatch) {
+      return {
+        content: statusMatch[2]?.trim() || "(no description)",
+        status: statusMatch[1]?.toLowerCase() ?? "pending",
+      };
+    }
+
+    const checkedMatch = /^(?:(?:\d+[.)]\s*)|(?:[-*]\s+))?\[[xX]\]\s*(.*)$/u.exec(line);
+    if (checkedMatch) {
+      return {
+        content: checkedMatch[1]?.trim() || "(no description)",
+        status: "completed",
+      };
+    }
+
+    const uncheckedMatch = /^(?:(?:\d+[.)]\s*)|(?:[-*]\s+))?\[\s*\]\s*(.*)$/u.exec(line);
+    if (uncheckedMatch) {
+      return {
+        content: uncheckedMatch[1]?.trim() || "(no description)",
+        status: "pending",
+      };
+    }
+
+    const numberedMatch = /^\d+[.)]\s+(.+)$/u.exec(line);
+    const bulletMatch = /^[-*]\s+(.+)$/u.exec(line);
+    return {
+      content: (numberedMatch?.[1] ?? bulletMatch?.[1] ?? line).trim(),
+      status: "pending",
+    };
+  });
+}
+
+function parseDroidTodoValue(value: unknown): ReadonlyArray<unknown> | undefined {
+  if (Array.isArray(value)) {
+    return value.length > 0 && typeof value[0] === "string"
+      ? parseDroidTodoText(value.join("\n"))
+      : value;
+  }
+  if (typeof value !== "string") return undefined;
+
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.length > 0 && typeof parsed[0] === "string"
+          ? parseDroidTodoText(parsed.join("\n"))
+          : parsed;
+      }
+    } catch {
+      // Droid falls back to line-based parsing when the JSON form is invalid.
+    }
+  }
+  return parseDroidTodoText(trimmed);
+}
+
+function normalizeDroidPlanEntries(entries: ReadonlyArray<unknown>): ReadonlyArray<DroidPlanStep> {
+  return entries
+    .map((entry) => {
+      const item = asRecord(entry);
+      const step =
+        [item?.content, item?.step, item?.title, entry]
+          .map(asText)
+          .find((value): value is string => value !== undefined) ?? undefined;
+      if (!step) return undefined;
+      const rawStatus = asText(item?.status)
+        ?.toLowerCase()
+        .replace(/[\s-]+/gu, "_");
+      if (rawStatus === "cancelled" || rawStatus === "canceled") return undefined;
+      const status =
+        rawStatus === "completed" || rawStatus === "complete" || rawStatus === "done"
+          ? "completed"
+          : rawStatus === "in_progress" ||
+              rawStatus === "active" ||
+              rawStatus === "running" ||
+              rawStatus === "started"
+            ? "inProgress"
+            : "pending";
+      return { step, status } satisfies DroidPlanStep;
+    })
+    .filter((entry): entry is DroidPlanStep => entry !== undefined);
+}
+
 function toolResultText(content: string | readonly unknown[]): string | undefined {
   if (typeof content === "string") return asText(content);
   return asText(
@@ -211,25 +307,23 @@ export function summarizeDroidToolResult(
 
 export function extractDroidPlan(input: unknown): ReadonlyArray<DroidPlanStep> | undefined {
   const record = asRecord(input);
-  const candidates = [record?.todos, record?.plan, record?.steps, record?.items];
-  const entries = candidates.find(Array.isArray);
-  if (!entries) return undefined;
-  const plan = entries
-    .map((entry) => {
-      const item = asRecord(entry);
-      const step = asText(item?.content ?? item?.step ?? item?.title ?? entry);
-      if (!step) return undefined;
-      const rawStatus = asText(item?.status)?.toLowerCase();
-      const status =
-        rawStatus === "completed" || rawStatus === "complete" || rawStatus === "done"
-          ? "completed"
-          : rawStatus === "in_progress" || rawStatus === "in-progress" || rawStatus === "active"
-            ? "inProgress"
-            : "pending";
-      return { step, status } satisfies DroidPlanStep;
-    })
-    .filter((entry): entry is DroidPlanStep => entry !== undefined);
-  return plan.length > 0 ? plan : undefined;
+  const arrayCandidates = [
+    Array.isArray(input) ? input : undefined,
+    record?.todos,
+    record?.plan,
+    record?.steps,
+    record?.items,
+  ];
+  const entries = arrayCandidates.find(Array.isArray);
+  if (entries) return normalizeDroidPlanEntries(entries);
+
+  const todoEntries = parseDroidTodoValue(
+    record?.todos ?? (typeof input === "string" ? input : undefined),
+  );
+  if (!todoEntries) return undefined;
+  // Preserve an empty recognized snapshot so the server can clear the
+  // previous live plan when Droid removes or cancels every todo.
+  return normalizeDroidPlanEntries(todoEntries);
 }
 
 export function droidProgressText(
@@ -338,6 +432,13 @@ export function toTokenUsageSnapshot(
   const outputTokens = (previous?.outputTokens ?? 0) + lastOutputTokens;
   const reasoningOutputTokens = (previous?.reasoningOutputTokens ?? 0) + lastReasoningOutputTokens;
   return {
+    ...(previous?.maxTokens !== undefined ? { maxTokens: previous.maxTokens } : {}),
+    ...(previous?.compactsAutomatically !== undefined
+      ? { compactsAutomatically: previous.compactsAutomatically }
+      : {}),
+    ...(previous?.autoCompactThreshold !== undefined
+      ? { autoCompactThreshold: previous.autoCompactThreshold }
+      : {}),
     usedTokens: inputTokens + outputTokens,
     inputTokens,
     cachedInputTokens,
@@ -348,5 +449,62 @@ export function toTokenUsageSnapshot(
     lastCachedInputTokens,
     lastOutputTokens,
     lastReasoningOutputTokens,
+  };
+}
+
+export function toInclusiveTokenUsageSnapshot(
+  usage: DroidTokenUsage,
+  previous?: ThreadTokenUsageSnapshot,
+  lastCall?: {
+    readonly inputTokens: number;
+    readonly cacheReadTokens: number;
+    readonly outputTokens?: number;
+    readonly reasoningOutputTokens?: number;
+  },
+): ThreadTokenUsageSnapshot {
+  const snapshot = toTokenUsageSnapshot(usage);
+  if (!lastCall) {
+    return {
+      ...snapshot,
+      ...(previous?.maxTokens !== undefined ? { maxTokens: previous.maxTokens } : {}),
+      ...(previous?.compactsAutomatically !== undefined
+        ? { compactsAutomatically: previous.compactsAutomatically }
+        : {}),
+      ...(previous?.autoCompactThreshold !== undefined
+        ? { autoCompactThreshold: previous.autoCompactThreshold }
+        : {}),
+    };
+  }
+
+  const lastInputTokens = lastCall.inputTokens + lastCall.cacheReadTokens;
+  const lastOutputTokens = lastCall.outputTokens ?? 0;
+  return {
+    ...snapshot,
+    ...(previous?.maxTokens !== undefined ? { maxTokens: previous.maxTokens } : {}),
+    ...(previous?.compactsAutomatically !== undefined
+      ? { compactsAutomatically: previous.compactsAutomatically }
+      : {}),
+    ...(previous?.autoCompactThreshold !== undefined
+      ? { autoCompactThreshold: previous.autoCompactThreshold }
+      : {}),
+    lastUsedTokens: lastInputTokens + lastOutputTokens,
+    lastInputTokens,
+    lastCachedInputTokens: lastCall.cacheReadTokens,
+    lastOutputTokens,
+    lastReasoningOutputTokens: lastCall.reasoningOutputTokens ?? 0,
+  };
+}
+
+export function withDroidContextStats(
+  usage: ThreadTokenUsageSnapshot | undefined,
+  stats: ContextStats,
+): ThreadTokenUsageSnapshot {
+  const usedTokens = Math.max(0, Math.round(stats.used));
+  const maxTokens = Math.max(1, Math.round(stats.limit));
+  return {
+    ...usage,
+    usedTokens,
+    maxTokens,
+    compactsAutomatically: true,
   };
 }

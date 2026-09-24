@@ -18,12 +18,16 @@ import {
 import {
   ApprovalRequestId,
   DroidSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderRuntimeEvent,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -31,6 +35,9 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { ServerConfig } from "../../config.ts";
+import { clearMcpProviderSession, setMcpProviderSession } from "../../mcp/McpProviderSession.ts";
+import { type DroidContext } from "../droid/DroidAdapterTypes.ts";
+import { handleDroidMessage, makeDroidEventBase } from "../droid/DroidRuntimeEvents.ts";
 import { makeDroidAdapter } from "./DroidAdapter.ts";
 
 const settings = Schema.decodeSync(DroidSettings)({
@@ -50,11 +57,26 @@ function fakeSession(
     ) => AsyncGenerator<DroidStreamEvent, void, undefined>;
     readonly onInterrupt?: () => Promise<void>;
     readonly onClose?: () => Promise<void>;
+    readonly onNotification?: (
+      callback: (notification: Record<string, unknown>) => void,
+    ) => () => void;
+    readonly getContextStats?: () => Promise<{
+      readonly used: number;
+      readonly remaining: number;
+      readonly limit: number;
+      readonly accuracy: "exact" | "estimated";
+      readonly updatedAt: string;
+    }>;
+    readonly onCompact?: () => Promise<{
+      readonly session: DroidSession;
+      readonly removedCount: number;
+    }>;
+    readonly id?: string;
   },
 ): DroidSession {
   let sessionSettings = { interactionMode: DroidInteractionMode.Auto } as DroidSession["settings"];
   return {
-    id: "droid-test-session",
+    id: hooks?.id ?? "droid-test-session",
     get settings() {
       return sessionSettings;
     },
@@ -72,6 +94,9 @@ function fakeSession(
     },
     interrupt: hooks?.onInterrupt ?? (async () => undefined),
     close: hooks?.onClose ?? (async () => undefined),
+    ...(hooks?.onNotification ? { onNotification: hooks.onNotification } : {}),
+    ...(hooks?.getContextStats ? { getContextStats: hooks.getContextStats } : {}),
+    ...(hooks?.onCompact ? { compact: hooks.onCompact } : {}),
     updateSettings: async (params: Parameters<DroidSession["updateSettings"]>[0]) => {
       sessionSettings = { ...sessionSettings, ...params } as DroidSession["settings"];
       return {} as never;
@@ -218,6 +243,431 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
           lastOutputTokens: 5,
           lastReasoningOutputTokens: 1,
         },
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("injects the prepared T3 MCP server and device environment", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-mcp-injection");
+      let createOptions: Record<string, unknown> | undefined;
+      setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment"),
+        threadId,
+        providerSessionId: "provider-session",
+        providerInstanceId: ProviderInstanceId.make("droid"),
+        endpoint: "http://127.0.0.1:4310/mcp",
+        authorizationHeader: "Bearer mcp-test-token",
+        capabilities: new Set(["preview", "device"]),
+        agentDeviceEnvironment: {
+          PATH: "C:\\agent-device-shim",
+          PATH_SEPARATOR: ";",
+          AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1",
+        },
+      });
+      const adapter = yield* makeDroidAdapter(settings, {
+        environment: { PATH: "C:\\base-path" },
+        sdk: {
+          createSession: async (options) => {
+            createOptions = options as Record<string, unknown>;
+            return fakeSession([]);
+          },
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      NodeAssert.deepEqual(createOptions?.mcpServers, [
+        {
+          type: "http",
+          name: "t3-code",
+          url: "http://127.0.0.1:4310/mcp",
+          headers: [{ name: "Authorization", value: "Bearer mcp-test-token" }],
+        },
+      ]);
+      NodeAssert.equal(
+        (createOptions?.env as Record<string, string> | undefined)?.PATH,
+        "C:\\agent-device-shim;C:\\base-path",
+      );
+      NodeAssert.equal(
+        (createOptions?.env as Record<string, string> | undefined)?.AGENT_DEVICE_NO_UPDATE_NOTIFIER,
+        "1",
+      );
+      clearMcpProviderSession(threadId);
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("maps native notifications into usage and hook lifecycle events", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-notifications");
+      let notify: ((notification: Record<string, unknown>) => void) | undefined;
+      let statsCall = 0;
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([], {
+              onNotification: (callback) => {
+                notify = callback;
+                return () => undefined;
+              },
+              getContextStats: async () => {
+                statsCall += 1;
+                return {
+                  used: statsCall === 1 ? 5 : 42,
+                  remaining: statsCall === 1 ? 95 : 58,
+                  limit: 100,
+                  accuracy: "exact",
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                };
+              },
+            }),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.take(9),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        runtimeMode: "full-access",
+      });
+      notify?.({
+        method: "droid.session_notification",
+        params: {
+          notification: {
+            type: "session_token_usage_changed",
+            sessionId: "droid-test-session",
+            tokenUsage: {
+              inputTokens: 20,
+              outputTokens: 10,
+              cacheCreationTokens: 0,
+              cacheReadTokens: 2,
+              thinkingTokens: 3,
+            },
+            inclusiveTokenUsage: {
+              inputTokens: 40,
+              outputTokens: 20,
+              cacheCreationTokens: 0,
+              cacheReadTokens: 4,
+              thinkingTokens: 6,
+            },
+            lastCallTokenUsage: {
+              inputTokens: 20,
+              cacheReadTokens: 2,
+              outputTokens: 10,
+            },
+          },
+        },
+      });
+      notify?.({
+        type: "hook_execution_started",
+        hookId: "hook-1",
+        hookEventName: "PreToolUse",
+        hookMatcher: "Execute",
+        hookCommands: [{ command: "echo hook" }],
+      });
+      notify?.({
+        type: "hook_execution_completed",
+        hookId: "hook-1",
+        hookEventName: "PreToolUse",
+        hookStatus: "completed",
+        hookResults: [{ exitCode: 0, stdout: "hook output", stderr: "" }],
+      });
+      notify?.({
+        params: {
+          type: "hook_execution_started",
+          hookId: "hook-2",
+          hookEventName: "PostToolUse",
+          hookMatcher: "Execute",
+        },
+      });
+      notify?.({
+        params: {
+          type: "hook_execution_completed",
+          hookId: "hook-2",
+          hookEventName: "PostToolUse",
+          hookStatus: "cancelled",
+          hookResults: [],
+        },
+      });
+
+      const events = Array.from(yield* joinEvents(eventsFiber));
+      const usages = events.filter((event) => event.type === "thread.token-usage.updated");
+      const hooks = events.filter(
+        (event) =>
+          event.type === "hook.started" ||
+          event.type === "hook.progress" ||
+          event.type === "hook.completed",
+      );
+      NodeAssert.equal(usages.length, 2);
+      const notificationUsage = usages[1];
+      NodeAssert.equal(notificationUsage?.type, "thread.token-usage.updated");
+      if (notificationUsage?.type === "thread.token-usage.updated") {
+        NodeAssert.equal(notificationUsage.payload.usage.usedTokens, 42);
+        NodeAssert.equal(notificationUsage.payload.usage.maxTokens, 100);
+        NodeAssert.equal(notificationUsage.payload.usage.compactsAutomatically, true);
+      }
+      NodeAssert.equal(
+        hooks[2]?.type === "hook.completed" ? hooks[2].payload.stdout : undefined,
+        "hook output",
+      );
+      NodeAssert.deepEqual(
+        hooks.map((event) => event.type),
+        ["hook.started", "hook.progress", "hook.completed", "hook.started", "hook.completed"],
+      );
+      NodeAssert.equal(
+        hooks[4]?.type === "hook.completed" ? hooks[4].payload.outcome : undefined,
+        "cancelled",
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("uses the replacement Droid session after native compaction", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-compaction");
+      let oldCloseCalls = 0;
+      const replacement = fakeSession(
+        [
+          {
+            type: "token_usage_update",
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0,
+            thinkingTokens: 0,
+          },
+        ],
+        {
+          id: "droid-compacted-session",
+          getContextStats: async () => ({
+            used: 12,
+            remaining: 88,
+            limit: 100,
+            accuracy: "exact",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        },
+      );
+      const original = fakeSession([], {
+        id: "droid-original-session",
+        onClose: async () => {
+          oldCloseCalls += 1;
+        },
+        getContextStats: async () => ({
+          used: 80,
+          remaining: 20,
+          limit: 100,
+          accuracy: "exact",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }),
+        onCompact: async () => ({
+          session: replacement,
+          removedCount: 7,
+        }),
+      });
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => original,
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const compactedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+
+      const started = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        runtimeMode: "full-access",
+      });
+      NodeAssert.equal(started.resumeCursor, "droid-original-session");
+      if (adapter.compaction?.type !== "native") {
+        throw new Error("Droid adapter must expose native compaction.");
+      }
+      yield* adapter.compaction.start(threadId);
+
+      const compacted = yield* Fiber.join(compactedFiber).pipe(Effect.timeout("2 seconds"));
+      NodeAssert.equal(compacted._tag, "Some");
+      const session = (yield* adapter.listSessions())[0];
+      NodeAssert.equal(session?.resumeCursor, "droid-compacted-session");
+      NodeAssert.equal(oldCloseCalls, 1);
+      if (compacted._tag === "Some") {
+        NodeAssert.equal(
+          compacted.value.type === "thread.state.changed"
+            ? compacted.value.payload.afterTokens
+            : undefined,
+          12,
+        );
+        NodeAssert.deepEqual(
+          compacted.value.type === "thread.state.changed"
+            ? compacted.value.payload.detail
+            : undefined,
+          {
+            source: "droid.sdk",
+            removedCount: 7,
+          },
+        );
+      }
+      const usageFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "thread.token-usage.updated"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* adapter.sendTurn({
+        threadId,
+        input: "after compaction",
+        attachments: [],
+      });
+      const usage = yield* Fiber.join(usageFiber).pipe(Effect.timeout("2 seconds"));
+      NodeAssert.equal(
+        usage._tag === "Some" && usage.value.type === "thread.token-usage.updated"
+          ? usage.value.payload.usage.usedTokens
+          : undefined,
+        12,
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("ignores notifications from a retired Droid session", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-stale-notification");
+      let notify: ((notification: Record<string, unknown>) => void) | undefined;
+      let resolveStatsStarted!: () => void;
+      let resolveStaleStats!: (stats: {
+        readonly used: number;
+        readonly remaining: number;
+        readonly limit: number;
+        readonly accuracy: "exact";
+        readonly updatedAt: string;
+      }) => void;
+      const statsStarted = new Promise<void>((resolve) => {
+        resolveStatsStarted = resolve;
+      });
+      const staleStats = new Promise<{
+        readonly used: number;
+        readonly remaining: number;
+        readonly limit: number;
+        readonly accuracy: "exact";
+        readonly updatedAt: string;
+      }>((resolve) => {
+        resolveStaleStats = resolve;
+      });
+      let statsCalls = 0;
+      const replacement = fakeSession([], {
+        id: "droid-stale-replacement",
+        getContextStats: async () => ({
+          used: 12,
+          remaining: 88,
+          limit: 100,
+          accuracy: "exact",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      });
+      const original = fakeSession([], {
+        id: "droid-stale-original",
+        onNotification: (callback) => {
+          notify = callback;
+          return () => undefined;
+        },
+        getContextStats: async () => {
+          statsCalls += 1;
+          if (statsCalls === 1) {
+            return {
+              used: 5,
+              remaining: 95,
+              limit: 100,
+              accuracy: "exact" as const,
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            };
+          }
+          resolveStatsStarted();
+          return staleStats;
+        },
+        onCompact: async () => ({
+          session: replacement,
+          removedCount: 1,
+        }),
+      });
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => original,
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const events: ProviderRuntimeEvent[] = [];
+      const compacted = yield* Deferred.make<void>();
+      yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "thread.state.changed" && event.payload.state === "compacted") {
+              yield* Deferred.succeed(compacted, undefined);
+            }
+          }),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        runtimeMode: "full-access",
+      });
+      notify?.({
+        type: "session_token_usage_changed",
+        sessionId: "droid-stale-original",
+        tokenUsage: {
+          inputTokens: 20,
+          outputTokens: 10,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          thinkingTokens: 0,
+        },
+      });
+      yield* Effect.promise(() => statsStarted);
+      if (adapter.compaction?.type !== "native") {
+        throw new Error("Droid adapter must expose native compaction.");
+      }
+      yield* adapter.compaction.start(threadId);
+      resolveStaleStats({
+        used: 99,
+        remaining: 1,
+        limit: 100,
+        accuracy: "exact",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Deferred.await(compacted);
+      yield* Effect.promise(() => staleStats);
+      yield* Effect.yieldNow;
+
+      NodeAssert.equal(
+        events.filter(
+          (event) =>
+            event.type === "thread.token-usage.updated" && event.payload.usage.usedTokens === 99,
+        ).length,
+        0,
       );
     }),
   ).pipe(Effect.provide(testLayer)),
@@ -622,6 +1072,251 @@ it.effect("maps Droid tool progress output and TodoWrite input to shared events"
       );
     }),
   ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("maps the Droid SDK TodoWrite text format into plan steps", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-text-plan");
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "tool_call",
+                toolUseId: "todo-text-1",
+                name: "TodoWrite",
+                input: {
+                  todos:
+                    "- [x] Inspect logs\n- [in_progress] Implement mapping\n- [ ] Verify output",
+                },
+              },
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const planFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.plan.updated"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "work through the text plan", attachments: [] });
+
+      const plan = yield* Fiber.join(planFiber).pipe(Effect.timeout("2 seconds"));
+      NodeAssert.equal(plan._tag, "Some");
+      if (plan._tag === "Some" && plan.value.type === "turn.plan.updated") {
+        NodeAssert.deepEqual(plan.value.payload.plan, [
+          { step: "Inspect logs", status: "completed" },
+          { step: "Implement mapping", status: "inProgress" },
+          { step: "Verify output", status: "pending" },
+        ]);
+      }
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("maps successive Droid TodoWrite snapshots into live plan updates", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-plan-updates");
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "tool_call_delta",
+                toolUse: {
+                  type: "tool_use" as never,
+                  id: "todo-1",
+                  name: "TodoWrite",
+                  input: {
+                    todos: [
+                      { content: "Inspect logs", status: "in_progress" },
+                      { content: "Implement mapping", status: "pending" },
+                    ],
+                  },
+                } as never,
+              },
+              {
+                type: "tool_call_delta",
+                toolUse: {
+                  type: "tool_use" as never,
+                  id: "todo-2",
+                  name: "TodoWrite",
+                  input: {
+                    todos: [
+                      { content: "Inspect logs", status: "completed" },
+                      { content: "Implement mapping", status: "active" },
+                      { content: "Cancelled task", status: "cancelled" },
+                    ],
+                  },
+                } as never,
+              },
+              {
+                type: "tool_call_delta",
+                toolUse: {
+                  type: "tool_use" as never,
+                  id: "todo-3",
+                  name: "TodoWrite",
+                  input: {
+                    todos: [{ content: "Cancelled task", status: "canceled" }],
+                  },
+                } as never,
+              },
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.plan.updated"),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "work through the tasks", attachments: [] });
+
+      const events = yield* joinEvents(eventsFiber);
+      NodeAssert.deepEqual(
+        events.map((event) => (event.type === "turn.plan.updated" ? event.payload.plan : [])),
+        [
+          [
+            { step: "Inspect logs", status: "inProgress" },
+            { step: "Implement mapping", status: "pending" },
+          ],
+          [
+            { step: "Inspect logs", status: "completed" },
+            { step: "Implement mapping", status: "inProgress" },
+          ],
+          [],
+        ],
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("ignores stale Droid messages and scopes plan deduplication to a turn", () =>
+  Effect.promise(async () => {
+    const threadId = ThreadId.make("droid-stale-plan");
+    const firstTurnId = TurnId.make("droid-turn-first");
+    const secondTurnId = TurnId.make("droid-turn-second");
+    const instanceId = ProviderInstanceId.make("droid");
+    const events: Array<ProviderRuntimeEvent> = [];
+    const context = {
+      session: {
+        provider: ProviderDriverKind.make("droid"),
+        providerInstanceId: instanceId,
+        status: "running",
+        runtimeMode: "full-access",
+        threadId,
+        model: "default",
+        activeTurnId: secondTurnId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      droid: {} as DroidSession,
+      pendingPermissions: new Map(),
+      pendingUserInputs: new Map(),
+      turns: [],
+      activeStartedToolIds: new Set<string>(),
+      activeToolInputs: new Map(),
+      activeToolOutputs: new Map(),
+      activeToolInputFingerprints: new Map(),
+      activePlanFingerprint: undefined,
+    } as unknown as DroidContext;
+    const eventBase = makeDroidEventBase(instanceId);
+    const message = (toolUseId: string) =>
+      ({
+        type: "tool_call",
+        toolUseId,
+        name: "TodoWrite",
+        input: { todos: "- [ ] Keep this task" },
+      }) as never as DroidStreamEvent;
+
+    await handleDroidMessage({
+      context,
+      turnId: firstTurnId,
+      message: message("stale-todo"),
+      eventBase,
+      emitNow: async (event) => {
+        events.push(event);
+      },
+    });
+    NodeAssert.equal(events.filter((event) => event.type === "turn.plan.updated").length, 0);
+
+    await handleDroidMessage({
+      context,
+      turnId: secondTurnId,
+      message: message("active-todo-1"),
+      eventBase,
+      emitNow: async (event) => {
+        events.push(event);
+      },
+    });
+    await handleDroidMessage({
+      context,
+      turnId: secondTurnId,
+      message: message("active-todo-2"),
+      eventBase,
+      emitNow: async (event) => {
+        events.push(event);
+      },
+    });
+    context.session = { ...context.session, activeTurnId: firstTurnId };
+    await handleDroidMessage({
+      context,
+      turnId: firstTurnId,
+      message: message("new-turn-todo"),
+      eventBase,
+      emitNow: async (event) => {
+        events.push(event);
+      },
+    });
+
+    const plans = events.filter((event) => event.type === "turn.plan.updated");
+    NodeAssert.equal(plans.length, 2);
+    NodeAssert.equal(plans[0]?.turnId, secondTurnId);
+    NodeAssert.equal(plans[1]?.turnId, firstTurnId);
+  }),
 );
 
 it.effect("summarizes Skill results without exposing the activation document", () =>

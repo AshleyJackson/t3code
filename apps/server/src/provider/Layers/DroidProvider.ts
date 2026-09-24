@@ -27,6 +27,7 @@ const DROID_PRESENTATION = {
   displayName: "Droid",
   badgeLabel: "Early Access",
   showInteractionModeToggle: true,
+  reportsContextWindow: true,
   supportsConversationRollback: false,
 } as const;
 const DROID_CLI_TIMEOUT_MS = 10_000;
