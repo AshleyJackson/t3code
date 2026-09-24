@@ -3,7 +3,6 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
@@ -38,7 +37,6 @@ export type DroidDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
-  | HttpClient.HttpClient
   | ServerConfig
   | ServerSettingsService;
 
@@ -70,7 +68,10 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         instanceId,
         environment: processEnv,
       });
-      const catalog = yield* makeDroidModelCatalog;
+      const catalog = makeDroidModelCatalog({
+        settings: effectiveConfig,
+        environment: processEnv,
+      });
       const checkProvider = checkDroidProviderStatus(effectiveConfig, processEnv, {
         catalog,
       }).pipe(

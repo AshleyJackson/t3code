@@ -242,12 +242,32 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           try: async () => {
             if (typeof input.resumeCursor === "string") {
               const resumed = await sdk.resumeSession(input.resumeCursor, commonOptions);
-              await resumed.updateSettings({
-                autonomyLevel: toAutonomyLevel(input),
-                ...(modelId ? { modelId } : {}),
-                ...(reasoningEffort ? { reasoningEffort } : {}),
-              });
-              return resumed;
+              try {
+                await resumed.updateSettings({
+                  autonomyLevel: toAutonomyLevel(input),
+                  ...(modelId ? { modelId } : {}),
+                  ...(reasoningEffort ? { reasoningEffort } : {}),
+                });
+                return resumed;
+              } catch (cause) {
+                // A persisted session can outlive the model or protocol version that
+                // created it. Start a fresh session rather than failing the turn when
+                // the daemon rejects settings on resume.
+                debugDroid("session.resume.settings.failed", {
+                  threadId: input.threadId,
+                  modelId,
+                  detail: cause instanceof Error ? cause.message : String(cause),
+                });
+                await resumed.close().catch(() => undefined);
+                return sdk.createSession({
+                  ...commonOptions,
+                  ...(input.cwd ? { cwd: input.cwd } : {}),
+                  ...(modelId ? { modelId } : {}),
+                  autonomyLevel: toAutonomyLevel(input),
+                  interactionMode: DroidInteractionMode.Auto,
+                  ...(reasoningEffort ? { reasoningEffort } : {}),
+                });
+              }
             }
             return sdk.createSession({
               ...commonOptions,

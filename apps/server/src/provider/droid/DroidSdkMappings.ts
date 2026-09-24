@@ -25,8 +25,7 @@ import type {
 
 export { DroidInteractionMode };
 
-// Labels the model selector shows for each `reasoningEffort` value;
-// docs.factory.ai/models.md documents the same relabeling (`xhigh` shows as "Extra High").
+// Labels the model selector shows for each `reasoningEffort` value.
 export const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   [ReasoningEffort.None]: "None",
   [ReasoningEffort.Dynamic]: "Dynamic",

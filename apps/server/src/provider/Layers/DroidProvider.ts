@@ -79,9 +79,6 @@ export class DroidModelDiscoveryError extends Data.TaggedError("DroidModelDiscov
 
 const defaultSdk: DroidProviderSdk = { listModels };
 
-const isUnsupportedDroidModelDiscoveryError = (error: DroidModelDiscoveryError): boolean =>
-  /unknown method:\s*droid\.list_models/iu.test(error.message);
-
 const modelProviderLabel = (provider: ModelProvider): string => {
   switch (provider) {
     case ModelProvider.ANTHROPIC:
@@ -221,12 +218,10 @@ export function checkDroidProviderStatus(
 ): Effect.Effect<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   return Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    // Only yielded on fallback paths; SDK discovery succeeding never collects the docs.
-    const catalogModels: Effect.Effect<ReadonlyArray<ServerProviderModel>> = options?.catalog
-      ? options.catalog.models.pipe(
-          Effect.orElseSucceed((): ReadonlyArray<ServerProviderModel> => []),
-        )
-      : Effect.succeed([]);
+    const catalogModels: Effect.Effect<ReadonlyArray<ServerProviderModel>> =
+      options?.catalog?.models.pipe(
+        Effect.orElseSucceed((): ReadonlyArray<ServerProviderModel> => []),
+      ) ?? Effect.succeed([]);
     const fallbackModels = Effect.map(catalogModels, (models) =>
       modelsWithSettingsFallback(models, settings),
     );
@@ -286,27 +281,18 @@ export function checkDroidProviderStatus(
     const detail = commandResult.stderr.trim() || commandResult.stdout.trim();
     const discoveredModels =
       commandResult.code === 0
-        ? yield* discoverDroidModels(settings, environment, options).pipe(
+        ? yield* catalogModels.pipe(
             Effect.timeoutOption(DROID_MODEL_DISCOVERY_TIMEOUT_MS),
             Effect.result,
           )
         : Result.succeed(Option.none<ReadonlyArray<ServerProviderModel>>());
-    // Older Droid CLIs can run sessions without exposing the optional model-list RPC.
-    // The docs catalog below keeps those installations usable without a false warning.
-    const modelDiscoveryUnsupported =
-      commandResult.code === 0 &&
-      Result.isFailure(discoveredModels) &&
-      isUnsupportedDroidModelDiscoveryError(discoveredModels.failure);
     const modelDiscoveryFailed =
       commandResult.code === 0 &&
-      !modelDiscoveryUnsupported &&
-      (Result.isFailure(discoveredModels) || Option.isNone(discoveredModels.success));
-    const discoveryMessage =
-      !modelDiscoveryUnsupported && Result.isFailure(discoveredModels)
-        ? discoveredModels.failure.message
-        : modelDiscoveryFailed
-          ? "Timed out while discovering Droid models."
-          : undefined;
+      (Result.isFailure(discoveredModels) ||
+        (Result.isSuccess(discoveredModels) && Option.isNone(discoveredModels.success)));
+    const discoveryMessage = modelDiscoveryFailed
+      ? "Timed out while discovering Droid models."
+      : undefined;
     const models =
       Result.isSuccess(discoveredModels) && Option.isSome(discoveredModels.success)
         ? modelsWithSettingsFallback(discoveredModels.success.value, settings)

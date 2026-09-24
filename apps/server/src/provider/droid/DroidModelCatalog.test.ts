@@ -1,116 +1,83 @@
-import { assert, it } from "@effect/vitest";
+import { listModels, ModelProvider, ReasoningEffort } from "@factory/droid-sdk/node";
+import { DroidSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { assert, it } from "@effect/vitest";
 
-import { makeDroidModelCatalog, parseFactoryModelsMarkdown } from "./DroidModelCatalog.ts";
+import { makeDroidModelCatalog, mapDroidModelInfo } from "./DroidModelCatalog.ts";
 
-const DOCS_MARKDOWN = [
-  "# Available Models",
-  "",
-  '## <span className="provider-heading"><img src="/docs-assets/images/anthropic.svg" alt="Anthropic logo" />Anthropic</span>',
-  "",
-  "| Model | Model ID | Multiplier | Reasoning |",
-  "| --- | --- | --- | --- |",
-  "| Claude Fable 5.1<sup>*</sup> | `claude-fable-5.1` | 4× | `off`, `low`, `medium`, `high` (default), `xhigh`, `max` |",
-  "| Claude Opus 4.5 | `claude-opus-4-5-20251101` | 2× | `off` (default), `low`, `medium`, `high` |",
-  "| Claude Opus 4.5 | `claude-opus-4-5-20251101` | 2× | `off` (default), `low` |",
-  "",
-  "## Droid Core (Open Models)",
-  "",
-  "| Model | Model ID | Multiplier | Reasoning |",
-  "| --- | --- | --- | --- |",
-  "| GPT-6 Luna | `gpt-6-luna` | 1× | `high` (default) |",
-  "| GLM-5.3 | `glm-5.3` | 0.56× | `low`, `high`, `max` (default) |",
-  "| MiniMax M2.7<sup>‡</sup> | `minimax-m2.7` | 0.12× | `high` (default) |",
-  "",
-  "## Custom models",
-  "",
-  "| Model | Model ID |",
-  "| --- | --- |",
-  "| BYOK model | `byok-model` |",
-].join("\n");
+const settings = DroidSettings.make({
+  enabled: true,
+  binaryPath: "droid",
+  customModels: [],
+});
 
-it("parses sections, effort defaults, and filters deprecated models from the doc", () => {
-  const models = parseFactoryModelsMarkdown(DOCS_MARKDOWN);
+const model = {
+  id: "grok-4.6",
+  displayName: "Grok 4.6",
+  shortDisplayName: "Grok",
+  modelProvider: ModelProvider.XAI,
+  supportedReasoningEfforts: [ReasoningEffort.Low, ReasoningEffort.High],
+  defaultReasoningEffort: ReasoningEffort.High,
+  isCustom: false,
+  noImageSupport: false,
+  supportsImageGeneration: false,
+};
 
-  assert.deepStrictEqual(
-    models.map((model) => ({
-      slug: model.slug,
-      name: model.name,
-      subProvider: model.subProvider,
-    })),
-    [
-      { slug: "claude-fable-5.1", name: "Claude Fable 5.1", subProvider: "Anthropic" },
-      { slug: "claude-opus-4-5-20251101", name: "Claude Opus 4.5", subProvider: "Anthropic" },
-      { slug: "glm-5.3", name: "GLM-5.3", subProvider: "Factory" },
-    ],
-  );
-
-  assert.deepStrictEqual(models[0]?.capabilities?.optionDescriptors?.[0], {
-    id: "reasoningEffort",
-    label: "Reasoning",
-    type: "select",
-    options: [
-      { id: "off", label: "Off" },
-      { id: "low", label: "Low" },
-      { id: "medium", label: "Medium" },
-      { id: "high", label: "High", isDefault: true },
-      { id: "xhigh", label: "Extra High" },
-      { id: "max", label: "Max" },
-    ],
-    currentValue: "high",
+it("maps SDK model metadata into a T3 provider model", () => {
+  assert.deepStrictEqual(mapDroidModelInfo(model), {
+    slug: "grok-4.6",
+    name: "Grok 4.6",
+    subProvider: "xAI",
+    isCustom: false,
+    capabilities: {
+      optionDescriptors: [
+        {
+          id: "reasoningEffort",
+          label: "Reasoning",
+          type: "select",
+          options: [
+            { id: "low", label: "Low" },
+            { id: "high", label: "High", isDefault: true },
+          ],
+          currentValue: "high",
+        },
+      ],
+    },
   });
 });
 
-it.effect("collects the catalog at most once a day and keeps serving it when a refresh fails", () =>
+it.effect("caches SDK model discovery for 24 hours", () =>
   Effect.gen(function* () {
     yield* TestClock.setTime(0);
     let fetches = 0;
-    const responses = [DOCS_MARKDOWN, "# Moved"];
-    const http = HttpClient.make((request) =>
-      Effect.sync(() => {
+    const catalog = makeDroidModelCatalog({
+      settings,
+      environment: { FACTORY_API_KEY: "test-key" },
+      listModels: (() => {
         fetches += 1;
-        return HttpClientResponse.fromWeb(request, new Response(responses[fetches - 1] ?? ""));
-      }),
-    );
-    const catalog = yield* makeDroidModelCatalog.pipe(
-      Effect.provideService(HttpClient.HttpClient, http),
-    );
+        return Promise.resolve([model]);
+      }) as typeof listModels,
+    });
 
     const first = yield* catalog.models;
     assert.equal(fetches, 1);
-    assert.deepStrictEqual(
-      first.map((model) => model.slug),
-      ["claude-fable-5.1", "claude-opus-4-5-20251101", "glm-5.3"],
-    );
-
-    // Inside the TTL the cached catalog is served without a second fetch.
     yield* TestClock.setTime(12 * 60 * 60 * 1000);
     assert.deepStrictEqual(yield* catalog.models, first);
     assert.equal(fetches, 1);
-
-    // A day later the doc is re-collected; a doc that no longer parses must
-    // not clobber the last good catalog.
     yield* TestClock.setTime(24 * 60 * 60 * 1000);
-    const refreshed = yield* catalog.models;
+    yield* catalog.models;
     assert.equal(fetches, 2);
-    assert.deepStrictEqual(
-      refreshed.map((model) => model.slug),
-      ["claude-fable-5.1", "claude-opus-4-5-20251101", "glm-5.3"],
-    );
   }),
 );
 
-it.effect("fails when the docs endpoint is unreachable and nothing is cached", () =>
+it.effect("fails when SDK discovery is unavailable without a cache", () =>
   Effect.gen(function* () {
-    const http = HttpClient.make((request) =>
-      Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({}, { status: 503 }))),
-    );
-    const catalog = yield* makeDroidModelCatalog.pipe(
-      Effect.provideService(HttpClient.HttpClient, http),
-    );
-
+    const catalog = makeDroidModelCatalog({
+      settings,
+      environment: {},
+      listModels: (() => Promise.reject(new Error("Authentication error"))) as typeof listModels,
+    });
     const failure = yield* catalog.models.pipe(Effect.flip);
     assert.equal(failure._tag, "DroidModelCatalogError");
   }),

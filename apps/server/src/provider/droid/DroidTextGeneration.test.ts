@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  collectDroidResponseText,
   parseDroidBranchName,
   parseDroidCommitMessage,
   parseDroidPrContent,
@@ -8,6 +9,28 @@ import {
 } from "./DroidTextGeneration.ts";
 
 describe("parseDroidThreadTitle", () => {
+  it("prefers the complete result text over partial assistant deltas", () => {
+    expect(
+      collectDroidResponseText([
+        { type: "assistant_text_delta", messageId: "m1", blockIndex: 0, text: '{"title":"' },
+        { type: "assistant_text_delta", messageId: "m1", blockIndex: 0, text: "incomplete" },
+        {
+          type: "result",
+          subtype: "success",
+          sessionId: "s1",
+          durationMs: 1,
+          tokenUsage: null,
+          messages: [],
+          text: '{"title":"Complete title","needsRefinement":false}',
+          turnCount: 1,
+          success: true,
+          interrupted: false,
+          error: null,
+        },
+      ]),
+    ).toBe('{"title":"Complete title","needsRefinement":false}');
+  });
+
   it("parses JSON and removes a markdown code fence", () => {
     expect(
       parseDroidThreadTitle(
@@ -15,6 +38,13 @@ describe("parseDroidThreadTitle", () => {
       ),
     ).toEqual({
       title: "Fix title regeneration",
+      needsRefinement: false,
+    });
+  });
+
+  it("recovers a title when the JSON response is truncated", () => {
+    expect(parseDroidThreadTitle('{"title":"Recoverable title","needsRefinement":false')).toEqual({
+      title: "Recoverable title",
       needsRefinement: false,
     });
   });
