@@ -324,8 +324,8 @@ it.effect("orders tool lifecycle events and ignores assistant messages without t
                     {
                       type: "tool_use" as never,
                       id: "tool-1",
-                      name: "Execute",
-                      input: { command: "pwd" },
+                      name: "WebSearch",
+                      input: { query: "Factory Droid model policy" },
                     },
                   ],
                 } as never,
@@ -336,20 +336,20 @@ it.effect("orders tool lifecycle events and ignores assistant messages without t
                 toolUse: {
                   type: "tool_use" as never,
                   id: "tool-1",
-                  name: "Execute",
-                  input: { command: "pwd" },
+                  name: "WebSearch",
+                  input: { query: "Factory Droid model policy" },
                 } as never,
               },
               {
                 type: "tool_call",
                 toolUseId: "tool-1",
-                name: "Execute",
+                name: "WebSearch",
                 input: { command: "pwd" },
               },
               {
                 type: "tool_result",
                 toolUseId: "tool-1",
-                toolName: "Execute",
+                toolName: "WebSearch",
                 content: "C:\\workspace",
                 isError: false,
               },
@@ -383,7 +383,7 @@ it.effect("orders tool lifecycle events and ignores assistant messages without t
         cwd: process.cwd(),
         runtimeMode: "full-access",
       });
-      yield* adapter.sendTurn({ threadId, input: "run pwd", attachments: [] });
+      yield* adapter.sendTurn({ threadId, input: "search", attachments: [] });
 
       const events = yield* joinEvents(eventsFiber);
       NodeAssert.equal(
@@ -403,6 +403,10 @@ it.effect("orders tool lifecycle events and ignores assistant messages without t
       NodeAssert.deepEqual(
         toolEvents.map((event) => event.type),
         ["item.started", "item.completed"],
+      );
+      NodeAssert.equal(
+        toolEvents[0]?.type === "item.started" ? toolEvents[0].payload.detail : undefined,
+        "Search query: Factory Droid model policy",
       );
     }),
   ).pipe(Effect.provide(testLayer)),
