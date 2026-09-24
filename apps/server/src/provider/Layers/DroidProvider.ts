@@ -10,6 +10,7 @@ import * as Result from "effect/Result";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import type { DroidModelCatalog } from "../droid/DroidModelCatalog.ts";
+import { debugDroid } from "../droid/DroidDebug.ts";
 import { REASONING_EFFORT_LABELS } from "../droid/DroidSdkMappings.ts";
 
 import {
@@ -306,6 +307,13 @@ export function checkDroidProviderStatus(
         : commandResult.code === 0
           ? modelsWithSettingsFallback([], settings)
           : yield* fallbackModels;
+    debugDroid("provider.status", {
+      commandCode: commandResult.code,
+      modelCount: models.length,
+      modelDiscoveryUnsupported,
+      modelDiscoveryFailed,
+      ...(discoveryMessage ? { discoveryMessage } : {}),
+    });
 
     return buildServerProvider({
       presentation: DROID_PRESENTATION,

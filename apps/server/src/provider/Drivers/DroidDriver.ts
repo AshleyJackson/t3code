@@ -1,14 +1,14 @@
-import { DroidSettings, ProviderDriverKind, TextGenerationError } from "@t3tools/contracts";
+import { DroidSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import type { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeDroidAdapter } from "../Layers/DroidAdapter.ts";
 import { checkDroidProviderStatus, makePendingDroidProvider } from "../Layers/DroidProvider.ts";
@@ -24,8 +24,6 @@ import { withInstanceIdentity } from "./instanceIdentity.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { makeDroidModelCatalog } from "../droid/DroidModelCatalog.ts";
 
-type TextGenerationService = TextGeneration["Service"];
-
 const decodeDroidSettings = Schema.decodeSync(DroidSettings);
 const DRIVER_KIND = ProviderDriverKind.make("droid");
 const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
@@ -37,6 +35,7 @@ export type DroidDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
+  | HttpClient.HttpClient
   | ServerConfig
   | ServerSettingsService;
 
@@ -64,14 +63,11 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies DroidSettings;
-      const catalog = makeDroidModelCatalog({
-        settings: effectiveConfig,
-        environment: processEnv,
-      });
       const adapter = yield* makeDroidAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
       });
+      const catalog = yield* makeDroidModelCatalog;
       const checkProvider = checkDroidProviderStatus(effectiveConfig, processEnv, {
         catalog,
       }).pipe(
