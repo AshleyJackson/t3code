@@ -1,7 +1,14 @@
-import { AutonomyLevel, createSession, type DroidStreamEvent } from "@factory/droid-sdk/node";
+import {
+  AutonomyLevel,
+  createSession,
+  type CreateSessionOptions,
+  type DroidSession,
+  type DroidStreamEvent,
+} from "@factory/droid-sdk/node";
 import { TextGenerationError, type DroidSettings, type ModelSelection } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 
 import {
   buildBranchNamePrompt,
@@ -15,6 +22,7 @@ import {
   sanitizeThreadTitle,
 } from "../../textGeneration/TextGenerationUtils.ts";
 import type { TextGeneration } from "../../textGeneration/TextGeneration.ts";
+import { toModelId, toReasoningEffort } from "./DroidSdkMappings.ts";
 
 function assistantText(message: DroidStreamEvent): string | undefined {
   if (message.type === "assistant_text_delta") {
@@ -35,7 +43,14 @@ export function collectDroidResponseText(messages: Iterable<DroidStreamEvent>): 
   let streamedText = "";
   let resultText: string | undefined;
   for (const message of messages) {
-    if (message.type === "result" && typeof message.text === "string") {
+    if (message.type === "result") {
+      if (!message.success) {
+        throw new Error(
+          message.interrupted
+            ? "Droid text generation was interrupted."
+            : (message.error?.message ?? "Droid text generation failed."),
+        );
+      }
       if (message.text.trim().length > 0) {
         resultText = message.text;
       }
@@ -141,7 +156,9 @@ export function parseDroidBranchName(raw: string): { readonly branch: string } {
 export function makeDroidTextGeneration(input: {
   readonly settings: DroidSettings;
   readonly environment: NodeJS.ProcessEnv;
+  readonly createSession?: (options?: CreateSessionOptions) => Promise<DroidSession>;
 }) {
+  const startSession = input.createSession ?? createSession;
   const runPrompt = <A>(
     operation: TextGenerationError["operation"],
     request: { readonly modelSelection: ModelSelection; readonly cwd: string },
@@ -154,10 +171,13 @@ export function makeDroidTextGeneration(input: {
           (entry): entry is [string, string] => typeof entry[1] === "string",
         ),
       );
-      const modelId = request.modelSelection.model;
+      const modelId = toModelId(request.modelSelection.model);
+      const reasoningEffort = toReasoningEffort(
+        getModelSelectionStringOptionValue(request.modelSelection, "reasoningEffort"),
+      );
       const session = yield* Effect.tryPromise({
         try: () =>
-          createSession({
+          startSession({
             execPath: input.settings.binaryPath,
             env: environment,
             ...(input.environment.FACTORY_API_KEY
@@ -165,7 +185,9 @@ export function makeDroidTextGeneration(input: {
               : {}),
             cwd: request.cwd,
             ...(modelId ? { modelId } : {}),
-            autonomyLevel: AutonomyLevel.Low,
+            ...(reasoningEffort ? { reasoningEffort } : {}),
+            autonomyLevel: AutonomyLevel.Off,
+            autoRejectPermissionRequests: true,
           }),
         catch: (cause) =>
           new TextGenerationError({

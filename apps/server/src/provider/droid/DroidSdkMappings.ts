@@ -113,6 +113,14 @@ export function toToolItemType(toolName: string): ToolLifecycleItemType {
   const normalized = toolName.toLowerCase();
   if (/(?:todo|plan)/u.test(normalized)) return "dynamic_tool_call";
   if (
+    normalized === "task" ||
+    normalized === "agent" ||
+    normalized.includes("subagent") ||
+    normalized.includes("sub-agent")
+  ) {
+    return "collab_agent_tool_call";
+  }
+  if (
     normalized.includes("exec") ||
     normalized.includes("bash") ||
     normalized.includes("command")
@@ -173,11 +181,9 @@ export function summarizeDroidToolResult(
     const skillName =
       /skill\s+["']([^"']+)["']\s+is\s+now\s+active/iu.exec(text)?.[1] ??
       /<skill\b[^>]*\bname=["']([^"']+)["']/iu.exec(text)?.[1];
-    return {
-      ...(skillName
-        ? { title: `Skill "${skillName}" is now active.` }
-        : { title: "Skill activated." }),
-    };
+    return skillName
+      ? { title: `Skill "${skillName}" is now active.` }
+      : { title: "Skill activated." };
   }
 
   if (/(?:edit|write|patch)/iu.test(toolName.trim())) {

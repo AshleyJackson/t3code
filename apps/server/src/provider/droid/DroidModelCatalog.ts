@@ -115,7 +115,7 @@ export function makeDroidModelCatalog(input: {
       ? fetched.success.filter((model) => model.disabled !== true).map(mapDroidModelInfo)
       : undefined;
     if (fresh === undefined || fresh.length === 0) {
-      if (cache !== undefined) return cache.models;
+      if (cache !== undefined) return filterBlacklistedModels(cache.models, now);
       return yield* new DroidModelCatalogError({
         message: "Droid model discovery returned no selectable models.",
       });

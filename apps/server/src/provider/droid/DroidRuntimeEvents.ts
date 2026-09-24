@@ -39,6 +39,27 @@ function droidWebSearchDetail(toolName: string, input: unknown): string | undefi
   return `Search query: ${normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized}`;
 }
 
+function droidToolTitle(toolName: string): string {
+  return toToolItemType(toolName) === "collab_agent_tool_call" ? "Subagent task" : toolName;
+}
+
+function droidToolInputDetail(toolName: string, input: unknown): string | undefined {
+  const searchDetail = droidWebSearchDetail(toolName, input);
+  if (searchDetail) return searchDetail;
+  if (toToolItemType(toolName) !== "collab_agent_tool_call") return undefined;
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return undefined;
+
+  const record = input as Record<string, unknown>;
+  const description =
+    typeof record.description === "string" ? record.description.trim() : undefined;
+  const prompt = typeof record.prompt === "string" ? record.prompt.trim() : undefined;
+  const detail = description || prompt;
+  if (!detail) return undefined;
+
+  const normalized = detail.replace(/\s+/gu, " ");
+  return normalized.length > 240 ? `${normalized.slice(0, 239)}…` : normalized;
+}
+
 export function completeDroidContentItem(
   completedItems: Set<string>,
   completedContents: Set<string>,
@@ -131,15 +152,15 @@ async function ensureDroidToolStarted(input: {
   });
   if (alreadyStarted) return false;
 
-  const searchDetail = droidWebSearchDetail(toolName, data);
+  const inputDetail = droidToolInputDetail(toolName, data);
   await emitNow({
     ...base(toolUseId),
     type: "item.started",
     payload: {
       itemType: toToolItemType(toolName),
       status: "inProgress",
-      ...(toolName ? { title: toolName } : {}),
-      ...(searchDetail ? { detail: searchDetail } : {}),
+      ...(toolName ? { title: droidToolTitle(toolName) } : {}),
+      ...(inputDetail ? { detail: inputDetail } : {}),
       ...(data !== undefined ? { data } : {}),
     },
   });
@@ -366,15 +387,15 @@ export async function handleDroidMessage(input: {
       }
       context.activeToolInputFingerprints.set(toolUseId, inputFingerprint);
       context.activeToolInputs.set(toolUseId, message.toolUse.input);
-      const searchDetail = droidWebSearchDetail(message.toolUse.name, message.toolUse.input);
+      const inputDetail = droidToolInputDetail(message.toolUse.name, message.toolUse.input);
       return emitNow({
         ...base(toolUseId),
         type: "item.updated",
         payload: {
           itemType: toToolItemType(message.toolUse.name),
           status: "inProgress",
-          title: message.toolUse.name,
-          ...(searchDetail ? { detail: searchDetail } : {}),
+          title: droidToolTitle(message.toolUse.name),
+          ...(inputDetail ? { detail: inputDetail } : {}),
           data: message.toolUse.input,
         },
       });
@@ -394,6 +415,10 @@ export async function handleDroidMessage(input: {
       }
       const progressSummary = summarizeDroidToolResult(message.toolName, progressText ?? "");
       const itemType = toToolItemType(message.toolName);
+      const inputDetail = droidToolInputDetail(
+        message.toolName,
+        context.activeToolInputs.get(message.toolUseId),
+      );
       if (progressText && (itemType === "command_execution" || itemType === "file_change")) {
         const delta = outputDelta(context, message.toolUseId, progressText);
         if (delta.length > 0) {
@@ -436,12 +461,14 @@ export async function handleDroidMessage(input: {
         payload: {
           itemType,
           status: "inProgress",
-          title: progressSummary.title ?? message.toolName,
+          title: progressSummary.title ?? droidToolTitle(message.toolName),
           ...(progressSummary.detail
             ? { detail: progressSummary.detail }
-            : progressText && !progressSummary.title
-              ? { detail: progressText }
-              : {}),
+            : itemType === "collab_agent_tool_call" && inputDetail
+              ? { detail: inputDetail }
+              : progressText && !progressSummary.title
+                ? { detail: progressText }
+                : {}),
           data: {
             ...message.update,
             ...(summary ? { summary } : {}),
@@ -464,23 +491,23 @@ export async function handleDroidMessage(input: {
       const resultSummary = message.isError
         ? {}
         : summarizeDroidToolResult(message.toolName, message.content);
+      const inputDetail = droidToolInputDetail(
+        message.toolName,
+        context.activeToolInputs.get(message.toolUseId),
+      );
+      const resultDetail = message.isError
+        ? typeof message.content === "string"
+          ? message.content
+          : JSON.stringify(message.content)
+        : (resultSummary.detail ?? inputDetail);
       return emitNow({
         ...base(message.toolUseId),
         type: "item.completed",
         payload: {
           itemType: toToolItemType(message.toolName),
           status: message.isError ? "failed" : "completed",
-          title: resultSummary.title ?? message.toolName,
-          ...(message.isError
-            ? {
-                detail:
-                  typeof message.content === "string"
-                    ? message.content
-                    : JSON.stringify(message.content),
-              }
-            : resultSummary.detail
-              ? { detail: resultSummary.detail }
-              : {}),
+          title: resultSummary.title ?? droidToolTitle(message.toolName),
+          ...(resultDetail ? { detail: resultDetail } : {}),
           data: {
             input: context.activeToolInputs.get(message.toolUseId),
             output: message.content,

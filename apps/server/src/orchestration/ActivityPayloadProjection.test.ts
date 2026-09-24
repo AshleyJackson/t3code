@@ -138,6 +138,28 @@ describe("projectActivityPayload", () => {
     expect(JSON.stringify(acp.payload).length).toBeLessThan(500);
   });
 
+  it("keeps a bounded summary of Droid tool output", () => {
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "dynamic_tool_call",
+        data: {
+          input: { query: "Factory Droid model policy" },
+          output: `Found the model policy\n${"x".repeat(5000)}`,
+        },
+      }),
+    );
+
+    expect(projected.payload).toMatchObject({
+      data: {
+        rawOutput: { content: "Found the model policy" },
+      },
+    });
+    expect(projected.payload).not.toMatchObject({
+      data: { output: expect.anything() },
+    });
+    expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
+  });
+
   it("keeps bounded Claude command input and result summaries", () => {
     const claude = projectActivityPayload(
       activity({

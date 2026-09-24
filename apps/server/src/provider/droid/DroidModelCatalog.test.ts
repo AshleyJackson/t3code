@@ -84,3 +84,30 @@ it.effect("fails when SDK discovery is unavailable without a cache", () =>
     assert.equal(failure._tag, "DroidModelCatalogError");
   }),
 );
+
+it.effect("keeps blacklisted models out of stale-cache fallbacks", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(0);
+    let fetches = 0;
+    const catalog = makeDroidModelCatalog({
+      settings,
+      environment: {},
+      listModels: (() => {
+        fetches += 1;
+        return fetches === 1
+          ? Promise.resolve([model])
+          : Promise.reject(new Error("Model discovery unavailable"));
+      }) as typeof listModels,
+    });
+
+    assert.deepStrictEqual(
+      (yield* catalog.models).map((entry) => entry.slug),
+      [model.id],
+    );
+    catalog.blacklistModel(model.id);
+    yield* TestClock.setTime(24 * 60 * 60 * 1000);
+
+    assert.deepStrictEqual(yield* catalog.models, []);
+    assert.equal(fetches, 2);
+  }),
+);
