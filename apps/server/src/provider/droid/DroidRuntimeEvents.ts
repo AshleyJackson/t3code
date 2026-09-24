@@ -27,6 +27,18 @@ function normalizedAssistantContent(value: string): string {
   return value.trim();
 }
 
+function droidWebSearchDetail(toolName: string, input: unknown): string | undefined {
+  if (!/^web[_\s-]?search$/iu.test(toolName)) return undefined;
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const record = input as Record<string, unknown>;
+  const query = ["query", "searchQuery", "search_query", "q"]
+    .map((key) => record[key])
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  if (!query) return undefined;
+  const normalized = query.replace(/\s+/gu, " ").trim();
+  return `Search query: ${normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized}`;
+}
+
 export function completeDroidContentItem(
   completedItems: Set<string>,
   completedContents: Set<string>,
@@ -119,6 +131,7 @@ async function ensureDroidToolStarted(input: {
   });
   if (alreadyStarted) return false;
 
+  const searchDetail = droidWebSearchDetail(toolName, data);
   await emitNow({
     ...base(toolUseId),
     type: "item.started",
@@ -126,6 +139,7 @@ async function ensureDroidToolStarted(input: {
       itemType: toToolItemType(toolName),
       status: "inProgress",
       ...(toolName ? { title: toolName } : {}),
+      ...(searchDetail ? { detail: searchDetail } : {}),
       ...(data !== undefined ? { data } : {}),
     },
   });
@@ -352,6 +366,7 @@ export async function handleDroidMessage(input: {
       }
       context.activeToolInputFingerprints.set(toolUseId, inputFingerprint);
       context.activeToolInputs.set(toolUseId, message.toolUse.input);
+      const searchDetail = droidWebSearchDetail(message.toolUse.name, message.toolUse.input);
       return emitNow({
         ...base(toolUseId),
         type: "item.updated",
@@ -359,6 +374,7 @@ export async function handleDroidMessage(input: {
           itemType: toToolItemType(message.toolUse.name),
           status: "inProgress",
           title: message.toolUse.name,
+          ...(searchDetail ? { detail: searchDetail } : {}),
           data: message.toolUse.input,
         },
       });
