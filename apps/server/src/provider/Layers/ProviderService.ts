@@ -1076,6 +1076,35 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
     });
 
+  const persistRuntimeResumeCursor = (
+    source: {
+      readonly instanceId: ProviderInstanceId;
+      readonly provider: ProviderDriverKind;
+    },
+    threadId: ThreadId,
+  ) =>
+    Effect.gen(function* () {
+      const adapter = yield* registry.getByInstance(source.instanceId);
+      const session = (yield* adapter.listSessions()).find(
+        (candidate) => candidate.threadId === threadId,
+      );
+      if (session?.resumeCursor === undefined) return;
+      const binding = yield* directory.getBinding(threadId);
+      if (Option.isNone(binding) || binding.value.providerInstanceId !== source.instanceId) {
+        return;
+      }
+      yield* directory.upsert({
+        threadId,
+        provider: source.provider,
+        providerInstanceId: source.instanceId,
+        resumeCursor: session.resumeCursor,
+      });
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("failed to persist provider resume state", { cause }),
+      ),
+    );
+
   const processRuntimeEvent = (
     source: {
       readonly instanceId: ProviderInstanceId;
@@ -1091,6 +1120,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         provider: canonicalEvent.provider,
         eventType: canonicalEvent.type,
       });
+      if (isCompactedEvent(canonicalEvent)) {
+        yield* persistRuntimeResumeCursor(source, canonicalEvent.threadId);
+      }
       if (canonicalEvent.type === "turn.started") {
         yield* observeTurnStartedForAnalytics(source, canonicalEvent);
       } else if (canonicalEvent.type === "model.rerouted") {
@@ -1103,31 +1135,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         if (source.provider === "claudeAgent") {
           // Background Claude turns have no sendTurn response to persist their
           // new native boundary. Save it before clients can checkpoint the turn.
-          yield* Effect.gen(function* () {
-            const adapter = yield* registry.getByInstance(source.instanceId);
-            const session = (yield* adapter.listSessions()).find(
-              (session) => session.threadId === canonicalEvent.threadId,
-            );
-            if (session?.resumeCursor !== undefined) {
-              const binding = yield* directory.getBinding(session.threadId);
-              if (
-                Option.isNone(binding) ||
-                binding.value.providerInstanceId !== source.instanceId
-              ) {
-                return;
-              }
-              yield* directory.upsert({
-                threadId: session.threadId,
-                provider: source.provider,
-                providerInstanceId: source.instanceId,
-                resumeCursor: session.resumeCursor,
-              });
-            }
-          }).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("failed to persist Claude turn resume state", { cause }),
-            ),
-          );
+          yield* persistRuntimeResumeCursor(source, canonicalEvent.threadId);
         }
       } else if (canonicalEvent.type === "session.exited") {
         yield* clearTurnAnalyticsSession(source.instanceId, canonicalEvent.threadId);
@@ -1149,13 +1157,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         return;
       }
       if (pendingCompaction.native) {
-        const compacted = isCompactedEvent(canonicalEvent);
-        const terminal = compacted ? "completed" : compactionTerminal(canonicalEvent);
-        yield* publishRuntimeEvent(
-          compacted ? withCompactionRequestId(canonicalEvent, pendingCompaction) : canonicalEvent,
-        );
-        if (terminal !== null)
-          yield* settleCompaction(canonicalEvent.threadId, pendingCompaction, terminal);
+        if (isCompactedEvent(canonicalEvent)) {
+          yield* publishRuntimeEvent(withCompactionRequestId(canonicalEvent, pendingCompaction));
+          yield* settleCompaction(canonicalEvent.threadId, pendingCompaction, "completed");
+        } else {
+          yield* publishRuntimeEvent(canonicalEvent);
+        }
         return;
       }
       if (
@@ -1510,25 +1517,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           })
           .pipe(Effect.onError(() => clearMcpSession(threadId)));
 
-        if (session.provider !== adapter.provider) {
-          yield* clearMcpSession(threadId);
-          return yield* toValidationError(
-            "ProviderService.startSession",
-            `Adapter/provider mismatch: requested '${adapter.provider}', received '${session.provider}'.`,
-          );
-        }
         const sessionWithInstance = {
           ...session,
           providerInstanceId: resolvedInstanceId,
         };
 
-        yield* stopStaleSessionsForThread({
-          threadId,
-          currentInstanceId: resolvedInstanceId,
+        const cleanupStartedSession = Effect.gen(function* () {
+          yield* adapter.stopSession(threadId).pipe(Effect.ignore);
+          yield* clearMcpSession(threadId).pipe(Effect.ignore);
         });
-        yield* upsertSessionBinding(sessionWithInstance, threadId, {
-          modelSelection: input.modelSelection,
-        });
+        yield* Effect.gen(function* () {
+          if (session.provider !== adapter.provider) {
+            return yield* toValidationError(
+              "ProviderService.startSession",
+              `Adapter/provider mismatch: requested '${adapter.provider}', received '${session.provider}'.`,
+            );
+          }
+          yield* stopStaleSessionsForThread({
+            threadId,
+            currentInstanceId: resolvedInstanceId,
+          });
+          yield* upsertSessionBinding(sessionWithInstance, threadId, {
+            modelSelection: input.modelSelection,
+          });
+        }).pipe(Effect.onError(() => cleanupStartedSession));
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,
           runtimeMode: input.runtimeMode,
@@ -1713,6 +1725,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
+      if (pendingCompactions.get(input.threadId)?.native === true) {
+        return yield* new ProviderAdapterRequestError({
+          provider: routed.adapter.provider,
+          method: "turn/start",
+          detail: "A native context compaction is already in progress.",
+        });
+      }
       // A turn is the clearest sign a session is still alive. The MCP
       // credential is minted once at session start and cannot be rotated into
       // an already-spawned agent process, so we keep the existing token valid

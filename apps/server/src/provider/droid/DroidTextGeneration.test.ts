@@ -4,6 +4,7 @@ import {
   type CreateSessionOptions,
   type DroidSession,
   type DroidStreamEvent,
+  type MessageOptions,
 } from "@factory/droid-sdk/node";
 import { DroidSettings, ProviderInstanceId } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -27,16 +28,28 @@ const settings = DroidSettings.make({
 
 function fakeSession(
   messages: ReadonlyArray<DroidStreamEvent>,
-  onClose?: () => void,
+  hooks?:
+    | (() => void)
+    | {
+        readonly onClose?: () => void;
+        readonly onStream?: (
+          prompt: string,
+          options?: MessageOptions,
+        ) => AsyncGenerator<DroidStreamEvent, void, undefined>;
+      },
 ): DroidSession {
   return {
     id: "droid-text-generation-test",
-    stream: async function* () {
+    stream: async function* (prompt: string, options?: MessageOptions) {
+      if (typeof hooks === "object" && hooks.onStream) {
+        yield* hooks.onStream(prompt, options);
+        return;
+      }
       for (const message of messages) {
         yield message;
       }
     },
-    close: async () => onClose?.(),
+    close: async () => (typeof hooks === "function" ? hooks() : hooks?.onClose?.()),
   } as unknown as DroidSession;
 }
 
@@ -61,6 +74,23 @@ describe("parseDroidThreadTitle", () => {
         },
       ]),
     ).toBe('{"title":"Complete title","needsRefinement":false}');
+  });
+
+  it("does not duplicate partial text with the aggregate assistant message", () => {
+    expect(
+      collectDroidResponseText([
+        { type: "assistant_text_delta", messageId: "m1", blockIndex: 0, text: "hello" },
+        {
+          type: "assistant",
+          message: {
+            id: "m1",
+            role: "assistant",
+            content: [{ type: "text" as never, text: "hello" }],
+          } as never,
+          text: "hello",
+        },
+      ]),
+    ).toBe("hello");
   });
 
   it("parses JSON and removes a markdown code fence", () => {
@@ -157,6 +187,93 @@ describe("parseDroidThreadTitle", () => {
       });
       expect(receivedOptions).not.toHaveProperty("modelId");
       expect(closed).toBe(true);
+    }),
+  );
+
+  it.effect("uses native structured output with the prompt schema", () =>
+    Effect.gen(function* () {
+      let streamOptions: MessageOptions | undefined;
+      const textGeneration = makeDroidTextGeneration({
+        settings,
+        environment: {},
+        createSession: async () =>
+          fakeSession([], {
+            onStream: async function* (_prompt, options) {
+              streamOptions = options;
+              yield {
+                type: "result",
+                subtype: "success",
+                sessionId: "s1",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                structuredOutput: {
+                  title: "Native title",
+                  needsRefinement: false,
+                },
+                structuredOutputError: null,
+                error: null,
+              };
+            },
+          }),
+      });
+
+      const result = yield* textGeneration.generateThreadTitle({
+        cwd: process.cwd(),
+        message: "Generate a title",
+        modelSelection: createModelSelection(ProviderInstanceId.make("droid"), "default"),
+      });
+
+      expect(result.title).toBe("Native title");
+      expect(streamOptions?.outputFormat).toMatchObject({
+        type: "json_schema",
+        schema: {
+          required: ["title", "needsRefinement"],
+          properties: {
+            title: { type: "string" },
+            needsRefinement: { type: "boolean" },
+          },
+        },
+      });
+    }),
+  );
+
+  it.effect("falls back to result text when structured output is null", () =>
+    Effect.gen(function* () {
+      const textGeneration = makeDroidTextGeneration({
+        settings,
+        environment: {},
+        createSession: async () =>
+          fakeSession([
+            {
+              type: "result",
+              subtype: "success",
+              sessionId: "s1",
+              durationMs: 1,
+              tokenUsage: null,
+              messages: [],
+              text: '{"title":"Text fallback","needsRefinement":false}',
+              turnCount: 1,
+              success: true,
+              interrupted: false,
+              structuredOutput: null,
+              structuredOutputError: null,
+              error: null,
+            },
+          ]),
+      });
+
+      const result = yield* textGeneration.generateThreadTitle({
+        cwd: process.cwd(),
+        message: "Generate a title",
+        modelSelection: createModelSelection(ProviderInstanceId.make("droid"), "default"),
+      });
+
+      expect(result.title).toBe("Text fallback");
     }),
   );
 

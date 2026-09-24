@@ -7,6 +7,7 @@ import {
 } from "@factory/droid-sdk/node";
 import { TextGenerationError, type DroidSettings, type ModelSelection } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 
@@ -20,6 +21,7 @@ import {
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitle,
+  toJsonSchemaObject,
 } from "../../textGeneration/TextGenerationUtils.ts";
 import type { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { toModelId, toReasoningEffort } from "./DroidSdkMappings.ts";
@@ -39,26 +41,59 @@ function assistantText(message: DroidStreamEvent): string | undefined {
     .join("");
 }
 
-export function collectDroidResponseText(messages: Iterable<DroidStreamEvent>): string {
-  let streamedText = "";
+function asJsonSchemaObject(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Droid text generation produced an invalid JSON Schema.");
+  }
+  return value as Record<string, unknown>;
+}
+
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+function collectDroidResponse(messages: Iterable<DroidStreamEvent>): {
+  readonly text: string;
+  readonly structuredOutput: unknown;
+} {
+  let partialText = "";
+  let assistantMessageText = "";
   let resultText: string | undefined;
+  let hasStructuredOutput = false;
+  let structuredOutput: unknown;
   for (const message of messages) {
     if (message.type === "result") {
       if (!message.success) {
         throw new Error(
           message.interrupted
             ? "Droid text generation was interrupted."
-            : (message.error?.message ?? "Droid text generation failed."),
+            : (message.structuredOutputError?.message ??
+                message.error?.message ??
+                "Droid text generation failed."),
         );
+      }
+      if (message.structuredOutput !== undefined && message.structuredOutput !== null) {
+        hasStructuredOutput = true;
+        structuredOutput = message.structuredOutput;
       }
       if (message.text.trim().length > 0) {
         resultText = message.text;
       }
       continue;
     }
-    streamedText += assistantText(message) ?? "";
+    const text = assistantText(message) ?? "";
+    if (message.type === "assistant_text_delta") {
+      partialText += text;
+    } else {
+      assistantMessageText += text;
+    }
   }
-  return resultText ?? streamedText;
+  return {
+    text: resultText ?? (partialText.length > 0 ? partialText : assistantMessageText),
+    structuredOutput: hasStructuredOutput ? structuredOutput : undefined,
+  };
+}
+
+export function collectDroidResponseText(messages: Iterable<DroidStreamEvent>): string {
+  return collectDroidResponse(messages).text;
 }
 
 export function parseDroidThreadTitle(raw: string): {
@@ -163,6 +198,7 @@ export function makeDroidTextGeneration(input: {
     operation: TextGenerationError["operation"],
     request: { readonly modelSelection: ModelSelection; readonly cwd: string },
     prompt: string,
+    outputSchema: Schema.Top,
     parse: (raw: string) => A,
   ) =>
     Effect.gen(function* () {
@@ -175,6 +211,10 @@ export function makeDroidTextGeneration(input: {
       const reasoningEffort = toReasoningEffort(
         getModelSelectionStringOptionValue(request.modelSelection, "reasoningEffort"),
       );
+      const outputFormat = {
+        type: "json_schema" as const,
+        schema: asJsonSchemaObject(toJsonSchemaObject(outputSchema)),
+      };
       const session = yield* Effect.tryPromise({
         try: () =>
           startSession({
@@ -202,10 +242,16 @@ export function makeDroidTextGeneration(input: {
           const messages: DroidStreamEvent[] = [];
           for await (const message of session.stream(prompt, {
             includePartialMessages: true,
+            outputFormat,
           })) {
             messages.push(message);
           }
-          return parse(collectDroidResponseText(messages));
+          const response = collectDroidResponse(messages);
+          return parse(
+            response.structuredOutput !== undefined
+              ? encodeJson(response.structuredOutput)
+              : response.text,
+          );
         },
         catch: (cause) =>
           new TextGenerationError({
@@ -219,20 +265,26 @@ export function makeDroidTextGeneration(input: {
   const generateThreadTitle: TextGeneration["Service"]["generateThreadTitle"] = Effect.fn(
     "DroidTextGeneration.generateThreadTitle",
   )(function* (request) {
-    const { prompt } = buildThreadTitlePrompt({
+    const { prompt, outputSchema } = buildThreadTitlePrompt({
       message: request.message,
       previousTitle: request.previousTitle,
       linkedContext: request.linkedContext,
       attachments: request.attachments,
     });
-    return yield* runPrompt("generateThreadTitle", request, prompt, parseDroidThreadTitle);
+    return yield* runPrompt(
+      "generateThreadTitle",
+      request,
+      prompt,
+      outputSchema,
+      parseDroidThreadTitle,
+    );
   });
 
   const generateCommitMessage: TextGeneration["Service"]["generateCommitMessage"] = Effect.fn(
     "DroidTextGeneration.generateCommitMessage",
   )(function* (request) {
-    const { prompt } = buildCommitMessagePrompt(request);
-    return yield* runPrompt("generateCommitMessage", request, prompt, (raw) =>
+    const { prompt, outputSchema } = buildCommitMessagePrompt(request);
+    return yield* runPrompt("generateCommitMessage", request, prompt, outputSchema, (raw) =>
       parseDroidCommitMessage(raw, request.includeBranch === true),
     );
   });
@@ -240,15 +292,27 @@ export function makeDroidTextGeneration(input: {
   const generatePrContent: TextGeneration["Service"]["generatePrContent"] = Effect.fn(
     "DroidTextGeneration.generatePrContent",
   )(function* (request) {
-    const { prompt } = buildPrContentPrompt(request);
-    return yield* runPrompt("generatePrContent", request, prompt, parseDroidPrContent);
+    const { prompt, outputSchema } = buildPrContentPrompt(request);
+    return yield* runPrompt(
+      "generatePrContent",
+      request,
+      prompt,
+      outputSchema,
+      parseDroidPrContent,
+    );
   });
 
   const generateBranchName: TextGeneration["Service"]["generateBranchName"] = Effect.fn(
     "DroidTextGeneration.generateBranchName",
   )(function* (request) {
-    const { prompt } = buildBranchNamePrompt(request);
-    return yield* runPrompt("generateBranchName", request, prompt, parseDroidBranchName);
+    const { prompt, outputSchema } = buildBranchNamePrompt(request);
+    return yield* runPrompt(
+      "generateBranchName",
+      request,
+      prompt,
+      outputSchema,
+      parseDroidBranchName,
+    );
   });
 
   return {

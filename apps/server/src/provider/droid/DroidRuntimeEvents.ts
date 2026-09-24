@@ -1,5 +1,12 @@
 import * as NodeCrypto from "node:crypto";
-import { type DroidStreamEvent, type TokenUsage, type TokenUsageUpdate } from "@factory/droid-sdk";
+import {
+  DroidWorkingState,
+  McpAuthOutcome,
+  type ContextStats,
+  type DroidStreamEvent,
+  type TokenUsage,
+  type TokenUsageUpdate,
+} from "@factory/droid-sdk";
 import {
   EventId,
   RuntimeItemId,
@@ -11,15 +18,17 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import { DROID_PROVIDER, type DroidContext } from "./DroidAdapterTypes.ts";
-import { debugDroid } from "./DroidDebug.ts";
+import { debugDroid, droidErrorDetails } from "./DroidDebug.ts";
 import {
   contentBlockText,
   droidProgressText,
   extractDroidPlan,
   isDroidPlanTool,
   summarizeDroidToolResult,
+  toInclusiveTokenUsageSnapshot,
   toTokenUsageSnapshot,
   toToolItemType,
+  withDroidContextStats,
 } from "./DroidSdkMappings.ts";
 
 export const nowIso = () => DateTime.formatIso(DateTime.nowUnsafe());
@@ -132,6 +141,387 @@ function usageSnapshot(
   return toTokenUsageSnapshot(usage, context.activeTokenUsageBaseline);
 }
 
+function notificationTokenUsageSnapshot(
+  usage: TokenUsage,
+  context: DroidContext,
+  inclusiveUsage?: TokenUsage,
+  lastCall?: {
+    readonly inputTokens: number;
+    readonly cacheReadTokens: number;
+    readonly outputTokens?: number;
+    readonly reasoningOutputTokens?: number;
+  },
+) {
+  return inclusiveUsage
+    ? toInclusiveTokenUsageSnapshot(inclusiveUsage, context.cumulativeTokenUsage, lastCall)
+    : toTokenUsageSnapshot(usage, context.cumulativeTokenUsage);
+}
+
+function hasNativeNotifications(context: DroidContext): boolean {
+  return context.notificationCleanup !== undefined;
+}
+
+function droidNotificationType(notification: Record<string, unknown>): string | undefined {
+  return typeof notification.type === "string" ? notification.type : undefined;
+}
+
+function droidNotificationString(
+  notification: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = notification[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function droidNotificationNumber(
+  notification: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = notification[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function droidNotificationRecord(
+  notification: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = notification[key];
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function droidNotificationTokenUsage(
+  notification: Record<string, unknown>,
+  key: string,
+): TokenUsage | undefined {
+  const value = droidNotificationRecord(notification, key);
+  if (!value) return undefined;
+  const fields = [
+    "inputTokens",
+    "outputTokens",
+    "cacheCreationTokens",
+    "cacheReadTokens",
+    "thinkingTokens",
+  ] as const;
+  if (fields.some((field) => typeof value[field] !== "number" || !Number.isFinite(value[field]))) {
+    return undefined;
+  }
+  return {
+    inputTokens: value.inputTokens as number,
+    outputTokens: value.outputTokens as number,
+    cacheCreationTokens: value.cacheCreationTokens as number,
+    cacheReadTokens: value.cacheReadTokens as number,
+    thinkingTokens: value.thinkingTokens as number,
+    ...(typeof value.factoryCredits === "number" ? { factoryCredits: value.factoryCredits } : {}),
+  };
+}
+
+function droidHookResultText(results: unknown, key: "stdout" | "stderr"): string | undefined {
+  if (!Array.isArray(results)) return undefined;
+  const values = results
+    .map((result) =>
+      result !== null && typeof result === "object" && !Array.isArray(result)
+        ? (result as Record<string, unknown>)[key]
+        : undefined,
+    )
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+  return values.length > 0 ? values.join("\n") : undefined;
+}
+
+function droidHookExitCode(results: unknown): number | undefined {
+  if (!Array.isArray(results)) return undefined;
+  const first = results[0];
+  if (first === null || typeof first !== "object" || Array.isArray(first)) return undefined;
+  const value = (first as Record<string, unknown>).exitCode;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+export async function refreshDroidContextStats(
+  context: DroidContext,
+  expectedDroid: DroidContext["droid"] = context.droid,
+): Promise<ContextStats | undefined> {
+  const getContextStats = expectedDroid.getContextStats;
+  if (typeof getContextStats !== "function") return undefined;
+  try {
+    const stats = await getContextStats.call(expectedDroid);
+    if (context.droid !== expectedDroid) return undefined;
+    context.activeTokenUsage = withDroidContextStats(context.activeTokenUsage, stats);
+    context.cumulativeTokenUsage = withDroidContextStats(context.cumulativeTokenUsage, stats);
+    return stats;
+  } catch (cause) {
+    debugDroid("context.stats.failed", { ...droidErrorDetails(cause) });
+    return undefined;
+  }
+}
+
+export async function handleDroidNotification(input: {
+  readonly context: DroidContext;
+  readonly sourceDroid: DroidContext["droid"];
+  readonly notification: Record<string, unknown>;
+  readonly turnId: TurnId | undefined;
+  readonly eventBase: DroidEventBase;
+  readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
+}) {
+  const { context, sourceDroid, notification, eventBase, emitNow } = input;
+  if (context.droid !== sourceDroid) return;
+  const turnId = input.turnId;
+  const belongsToCurrentTurn =
+    turnId !== undefined
+      ? turnId === context.session.activeTurnId
+      : context.session.activeTurnId === undefined;
+  const base = (itemId?: string) =>
+    eventBase(context, {
+      ...(turnId ? { turnId } : {}),
+      raw: notification,
+      ...(itemId ? { itemId } : {}),
+    });
+  const type = droidNotificationType(notification);
+
+  switch (type) {
+    case "session_token_usage_changed": {
+      const usage = droidNotificationTokenUsage(notification, "tokenUsage");
+      if (!usage) return;
+      const sourceDroid = context.droid;
+      const inclusiveUsage = droidNotificationTokenUsage(notification, "inclusiveTokenUsage");
+      const lastCall = droidNotificationRecord(notification, "lastCallTokenUsage");
+      const snapshot = notificationTokenUsageSnapshot(
+        usage,
+        context,
+        inclusiveUsage,
+        lastCall
+          ? {
+              inputTokens: typeof lastCall.inputTokens === "number" ? lastCall.inputTokens : 0,
+              cacheReadTokens:
+                typeof lastCall.cacheReadTokens === "number" ? lastCall.cacheReadTokens : 0,
+              ...(typeof lastCall.outputTokens === "number"
+                ? { outputTokens: lastCall.outputTokens }
+                : {}),
+            }
+          : undefined,
+      );
+      let stats: ContextStats | undefined;
+      if (belongsToCurrentTurn) {
+        stats = await refreshDroidContextStats(context, sourceDroid);
+        if (context.droid !== sourceDroid) return;
+      }
+      const appliedUsage = stats ? withDroidContextStats(snapshot, stats) : snapshot;
+      context.cumulativeTokenUsage = appliedUsage;
+      if (belongsToCurrentTurn) {
+        context.activeTokenUsage = appliedUsage;
+      }
+      return emitNow({
+        ...base(),
+        type: "thread.token-usage.updated",
+        payload: {
+          usage: appliedUsage,
+        },
+        ...(stats
+          ? {
+              raw: {
+                source: "droid.sdk.message" as const,
+                payload: { notification, contextStats: stats },
+              },
+            }
+          : {}),
+      });
+    }
+    case "agent_turn_completed": {
+      const sourceDroid = context.droid;
+      const usage = droidNotificationTokenUsage(notification, "tokenUsage");
+      const cumulativeUsage = droidNotificationTokenUsage(notification, "cumulativeTokenUsage");
+      if (context.droid !== sourceDroid) return;
+      if (usage) {
+        const snapshot = notificationTokenUsageSnapshot(
+          usage,
+          context,
+          cumulativeUsage,
+          cumulativeUsage
+            ? {
+                inputTokens: usage.inputTokens,
+                cacheReadTokens: usage.cacheReadTokens,
+                outputTokens: usage.outputTokens,
+                reasoningOutputTokens: usage.thinkingTokens,
+              }
+            : undefined,
+        );
+        context.cumulativeTokenUsage = snapshot;
+        if (belongsToCurrentTurn) {
+          context.activeTokenUsage = snapshot;
+        }
+      }
+      const durationMs = droidNotificationNumber(notification, "durationMs");
+      if (belongsToCurrentTurn && context.activeTokenUsage && durationMs !== undefined) {
+        context.activeTokenUsage = { ...context.activeTokenUsage, durationMs };
+        context.cumulativeTokenUsage = { ...context.activeTokenUsage };
+      }
+      return context.cumulativeTokenUsage
+        ? emitNow({
+            ...base(),
+            type: "thread.token-usage.updated",
+            payload: { usage: context.cumulativeTokenUsage },
+          })
+        : undefined;
+    }
+    case "session_compacted": {
+      if (context.compactionInProgress) {
+        context.pendingCompactionNotification = notification;
+        return;
+      }
+      const sourceDroid = context.droid;
+      const beforeTokens = context.cumulativeTokenUsage?.usedTokens;
+      const stats = await refreshDroidContextStats(context, sourceDroid);
+      if (context.droid !== sourceDroid) return;
+      return emitNow({
+        ...eventBase(context, { raw: notification }),
+        type: "thread.state.changed",
+        payload: {
+          state: "compacted",
+          ...(beforeTokens !== undefined ? { beforeTokens } : {}),
+          ...(stats ? { afterTokens: stats.used } : {}),
+          detail: {
+            source: "droid.sdk",
+            summaryId: droidNotificationString(notification, "summaryId"),
+            removedCount: droidNotificationNumber(notification, "removedCount"),
+            visibleBoundaryMessageId: notification.visibleBoundaryMessageId ?? null,
+          },
+        },
+      });
+    }
+    case "droid_working_state_changed": {
+      const state = droidNotificationString(notification, "newState");
+      return emitNow({
+        ...base(),
+        type: "session.state.changed",
+        payload: {
+          state:
+            state === "idle"
+              ? "ready"
+              : state === "waiting_for_tool_confirmation"
+                ? "waiting"
+                : "running",
+          detail: notification,
+        },
+      });
+    }
+    case "session_title_updated":
+      return emitNow({
+        ...base(),
+        type: "thread.metadata.updated",
+        payload: { name: droidNotificationString(notification, "title") },
+      });
+    case "settings_updated":
+      return emitNow({
+        ...base(),
+        type: "session.configured",
+        payload: {
+          config: droidNotificationRecord(notification, "settings") ?? notification,
+        },
+      });
+    case "mcp_status_changed":
+      return emitNow({
+        ...base(),
+        type: "mcp.status.updated",
+        payload: { status: notification },
+      });
+    case "mcp_auth_required":
+      return emitNow({
+        ...base(),
+        type: "auth.status",
+        payload: {
+          isAuthenticating: true,
+          output: [
+            droidNotificationString(notification, "message") ?? "MCP authentication required.",
+          ],
+        },
+      });
+    case "mcp_auth_completed": {
+      const outcome = droidNotificationString(notification, "outcome");
+      return emitNow({
+        ...base(),
+        type: "mcp.oauth.completed",
+        payload: {
+          success: outcome === "success",
+          ...(droidNotificationString(notification, "serverName")
+            ? { name: droidNotificationString(notification, "serverName") }
+            : {}),
+          ...(outcome !== "success" && droidNotificationString(notification, "message")
+            ? { error: droidNotificationString(notification, "message") }
+            : {}),
+        },
+      });
+    }
+    case "llm_retry":
+      return emitNow({
+        ...base(),
+        type: "runtime.warning",
+        payload: {
+          message: `Droid is retrying the model request (attempt ${String(
+            droidNotificationNumber(notification, "attempt") ?? 0,
+          )}).`,
+          detail: notification,
+        },
+      });
+    case "hook_execution_started": {
+      const hookId = droidNotificationString(notification, "hookId");
+      if (!hookId || context.activeHookIds.has(hookId)) return;
+      context.activeHookIds.add(hookId);
+      return emitNow({
+        ...base(hookId),
+        type: "hook.started",
+        payload: {
+          hookId,
+          hookName:
+            droidNotificationString(notification, "hookMatcher") ??
+            droidNotificationString(notification, "hookEventName") ??
+            "Droid hook",
+          hookEvent: droidNotificationString(notification, "hookEventName") ?? "unknown",
+        },
+      });
+    }
+    case "hook_execution_completed": {
+      const hookId = droidNotificationString(notification, "hookId");
+      if (!hookId || context.completedHookIds.has(hookId)) return;
+      context.completedHookIds.add(hookId);
+      context.activeHookIds.delete(hookId);
+      const status = droidNotificationString(notification, "hookStatus");
+      const stdout = droidHookResultText(notification.hookResults, "stdout");
+      const stderr = droidHookResultText(notification.hookResults, "stderr");
+      if (stdout || stderr) {
+        await emitNow({
+          ...base(hookId),
+          type: "hook.progress",
+          payload: {
+            hookId,
+            ...(stdout ? { stdout, output: stdout } : {}),
+            ...(stderr ? { stderr } : {}),
+          },
+        });
+      }
+      return emitNow({
+        ...base(hookId),
+        type: "hook.completed",
+        payload: {
+          hookId,
+          outcome:
+            status === "error"
+              ? "error"
+              : status === "cancelled" || status === "canceled"
+                ? "cancelled"
+                : "success",
+          ...(stdout ? { stdout } : {}),
+          ...(stderr ? { stderr } : {}),
+          ...(droidHookExitCode(notification.hookResults) !== undefined
+            ? { exitCode: droidHookExitCode(notification.hookResults) }
+            : {}),
+        },
+      });
+    }
+    default:
+      return;
+  }
+}
+
 async function ensureDroidToolStarted(input: {
   readonly context: DroidContext;
   readonly toolUseId: string;
@@ -181,12 +571,13 @@ function outputDelta(context: DroidContext, toolUseId: string, output: string): 
 
 async function emitDroidPlan(input: {
   readonly context: DroidContext;
+  readonly turnId: TurnId;
   readonly toolUseId: string;
   readonly plan: ReadonlyArray<{ step: string; status: "pending" | "inProgress" | "completed" }>;
   readonly base: (itemId?: string) => DroidEvent;
   readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
 }) {
-  const fingerprint = JSON.stringify(input.plan);
+  const fingerprint = `${input.turnId}:${JSON.stringify(input.plan)}`;
   if (input.context.activePlanFingerprint === fingerprint) return;
   input.context.activePlanFingerprint = fingerprint;
   await input.emitNow({
@@ -204,6 +595,14 @@ export async function handleDroidMessage(input: {
   readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
 }) {
   const { context, turnId, message, eventBase, emitNow } = input;
+  if (context.session.activeTurnId !== turnId) {
+    debugDroid("turn.message.stale", {
+      activeTurnId: context.session.activeTurnId,
+      messageType: message.type,
+      turnId,
+    });
+    return;
+  }
   const base = (itemId?: string) =>
     eventBase(context, { turnId, raw: message, ...(itemId ? { itemId } : {}) });
 
@@ -346,9 +745,10 @@ export async function handleDroidMessage(input: {
       });
       if (isDroidPlanTool(message.name)) {
         const plan = extractDroidPlan(message.input);
-        if (plan) {
+        if (plan !== undefined) {
           await emitDroidPlan({
             context,
+            turnId,
             toolUseId: message.toolUseId,
             plan,
             base,
@@ -371,9 +771,10 @@ export async function handleDroidMessage(input: {
       });
       if (isDroidPlanTool(message.toolUse.name)) {
         const plan = extractDroidPlan(message.toolUse.input);
-        if (plan) {
+        if (plan !== undefined) {
           await emitDroidPlan({
             context,
+            turnId,
             toolUseId,
             plan,
             base,
@@ -516,32 +917,96 @@ export async function handleDroidMessage(input: {
         },
       });
     }
+    case "hook": {
+      if (hasNativeNotifications(context)) return;
+      if (!message.hookId) return;
+      if (message.status === "started") {
+        if (context.activeHookIds.has(message.hookId)) return;
+        context.activeHookIds.add(message.hookId);
+        return emitNow({
+          ...base(message.hookId),
+          type: "hook.started",
+          payload: {
+            hookId: message.hookId,
+            hookName: message.matcher ?? message.eventName ?? message.command ?? "Droid hook",
+            hookEvent: message.eventName ?? "unknown",
+          },
+        });
+      }
+      if (context.completedHookIds.has(message.hookId)) return;
+      context.completedHookIds.add(message.hookId);
+      context.activeHookIds.delete(message.hookId);
+      if (message.stdout || message.stderr) {
+        await emitNow({
+          ...base(message.hookId),
+          type: "hook.progress",
+          payload: {
+            hookId: message.hookId,
+            ...(message.stdout ? { stdout: message.stdout, output: message.stdout } : {}),
+            ...(message.stderr ? { stderr: message.stderr } : {}),
+          },
+        });
+      }
+      return emitNow({
+        ...base(message.hookId),
+        type: "hook.completed",
+        payload: {
+          hookId: message.hookId,
+          outcome: message.status === "error" ? "error" : "success",
+          ...(message.stdout ? { stdout: message.stdout } : {}),
+          ...(message.stderr ? { stderr: message.stderr } : {}),
+          ...(message.exitCode !== undefined ? { exitCode: message.exitCode } : {}),
+        },
+      });
+    }
     case "working_state_changed":
+      if (hasNativeNotifications(context)) return;
       return emitNow({
         ...base(),
         type: "session.state.changed",
         payload: {
           state:
-            message.state === "idle"
+            message.state === DroidWorkingState.Idle
               ? "ready"
-              : message.state === "waiting_for_tool_confirmation"
+              : message.state === DroidWorkingState.WaitingForToolConfirmation
                 ? "waiting"
                 : "running",
           detail: message,
         },
       });
-    case "token_usage_update":
-      context.activeTokenUsage = usageSnapshot(message, context);
-      context.cumulativeTokenUsage = context.activeTokenUsage;
+    case "token_usage_update": {
+      if (hasNativeNotifications(context)) return;
+      const sourceDroid = context.droid;
+      const snapshot = usageSnapshot(message, context);
+      const stats = await refreshDroidContextStats(context, sourceDroid);
+      if (context.droid !== sourceDroid) return;
+      const usage = stats ? withDroidContextStats(snapshot, stats) : snapshot;
+      context.activeTokenUsage = usage;
+      context.cumulativeTokenUsage = usage;
       return emitNow({
         ...base(),
         type: "thread.token-usage.updated",
         payload: { usage: context.activeTokenUsage },
+        ...(stats
+          ? {
+              raw: {
+                source: "droid.sdk.message" as const,
+                payload: { message, contextStats: stats },
+              },
+            }
+          : {}),
       });
-    case "result":
-      if (message.tokenUsage) {
-        context.activeTokenUsage = usageSnapshot(message.tokenUsage, context);
-        context.cumulativeTokenUsage = context.activeTokenUsage;
+    }
+    case "result": {
+      if (message.tokenUsage && !hasNativeNotifications(context)) {
+        const sourceDroid = context.droid;
+        const snapshot = usageSnapshot(message.tokenUsage, context);
+        const stats = await refreshDroidContextStats(context, sourceDroid);
+        if (context.droid === sourceDroid) {
+          const usage = stats ? withDroidContextStats(snapshot, stats) : snapshot;
+          context.activeTokenUsage = usage;
+          context.cumulativeTokenUsage = usage;
+        }
       }
       context.activeTurnState = message.interrupted
         ? "interrupted"
@@ -552,38 +1017,44 @@ export async function handleDroidMessage(input: {
         context.activeTurnError = message.error?.message ?? "Droid reported an unsuccessful turn.";
       }
       return;
+    }
     case "session_title_updated":
+      if (hasNativeNotifications(context)) return;
       return emitNow({
         ...base(),
         type: "thread.metadata.updated",
         payload: { name: message.title },
       });
     case "settings_updated":
+      if (hasNativeNotifications(context)) return;
       return emitNow({
         ...base(),
         type: "session.configured",
         payload: { config: message.settings },
       });
     case "mcp_status_changed":
+      if (hasNativeNotifications(context)) return;
       return emitNow({
         ...base(),
         type: "mcp.status.updated",
         payload: { status: message },
       });
     case "mcp_auth_required":
+      if (hasNativeNotifications(context)) return;
       return emitNow({
         ...base(),
         type: "auth.status",
         payload: { isAuthenticating: true, output: [message.message] },
       });
     case "mcp_auth_completed":
+      if (hasNativeNotifications(context)) return;
       return emitNow({
         ...base(),
         type: "mcp.oauth.completed",
         payload: {
-          success: message.outcome === "success",
+          success: message.outcome === McpAuthOutcome.Success,
           name: message.serverName,
-          ...(message.outcome === "success" ? {} : { error: message.message }),
+          ...(message.outcome === McpAuthOutcome.Success ? {} : { error: message.message }),
         },
       });
     case "error":
