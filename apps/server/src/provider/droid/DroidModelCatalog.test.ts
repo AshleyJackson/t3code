@@ -94,7 +94,7 @@ it.effect("collects the catalog at most once a day and keeps serving it when a r
         return HttpClientResponse.fromWeb(request, new Response(responses[fetches - 1] ?? ""));
       }),
     );
-    const catalog = yield* makeDroidModelCatalog.pipe(
+    const catalog = yield* makeDroidModelCatalog().pipe(
       Effect.provideService(HttpClient.HttpClient, http),
     );
 
@@ -127,7 +127,7 @@ it.effect("fails when the docs endpoint is unreachable and nothing is cached", (
     const http = HttpClient.make((request) =>
       Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({}, { status: 503 }))),
     );
-    const catalog = yield* makeDroidModelCatalog.pipe(
+    const catalog = yield* makeDroidModelCatalog().pipe(
       Effect.provideService(HttpClient.HttpClient, http),
     );
 
