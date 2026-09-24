@@ -264,6 +264,44 @@ it.effect("starts a fresh session when a resumed session rejects settings", () =
   ).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("surfaces SDK protocol metadata when session initialization fails", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => {
+            const error = new Error("Initialize session request failed") as Error & {
+              metadata: Record<string, unknown>;
+            };
+            error.metadata = {
+              code: -32001,
+              message: "Model access denied",
+              data: { message: "The selected model is not available for this account." },
+            };
+            throw error;
+          },
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+
+      const result = yield* adapter
+        .startSession({
+          threadId: ThreadId.make("droid-init-error"),
+          provider: ProviderDriverKind.make("droid"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(ProviderInstanceId.make("droid"), "grok-4.6", []),
+        })
+        .pipe(Effect.flip);
+
+      NodeAssert.equal(result._tag, "ProviderAdapterRequestError");
+      NodeAssert.match(result.detail, /Model access denied/u);
+      NodeAssert.match(result.detail, /code -32001/u);
+      NodeAssert.match(result.detail, /not available for this account/u);
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("orders tool lifecycle events and ignores assistant messages without text", () =>
   Effect.scoped(
     Effect.gen(function* () {

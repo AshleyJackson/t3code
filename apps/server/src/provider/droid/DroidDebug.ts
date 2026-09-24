@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 type DebugRecord = Record<string, unknown>;
+const SENSITIVE_KEY = /api[-_]?key|authorization|cookie|password|secret|token/iu;
 
 const DROID_DEBUG_LOG_PATH = join(tmpdir(), "droid-test.log");
 
@@ -19,6 +20,61 @@ initializeDroidDebugLog();
 
 const isRecord = (value: unknown): value is DebugRecord =>
   typeof value === "object" && value !== null;
+
+const summarizeErrorValue = (value: unknown, depth = 0): unknown => {
+  if (depth > 3) return "[truncated]";
+  if (typeof value === "string") {
+    return value.length > 1000 ? `${value.slice(0, 1000)}…` : value;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => summarizeErrorValue(item, depth + 1));
+  }
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(record)
+      .slice(0, 40)
+      .map(([key, item]) => [
+        key,
+        SENSITIVE_KEY.test(key) ? "[redacted]" : summarizeErrorValue(item, depth + 1),
+      ]),
+  );
+};
+
+export function droidErrorDetails(error: unknown): DebugRecord {
+  if (!isRecord(error)) return { error: String(error) };
+  const metadata = isRecord(error.metadata) ? summarizeErrorValue(error.metadata) : undefined;
+  return {
+    errorName: typeof error.name === "string" ? error.name : undefined,
+    errorMessage: typeof error.message === "string" ? error.message : String(error),
+    ...(metadata !== undefined ? { errorMetadata: metadata } : {}),
+  };
+}
+
+export function droidErrorMessage(error: unknown, fallback = "Droid request failed."): string {
+  const details = droidErrorDetails(error);
+  const message = typeof details.errorMessage === "string" ? details.errorMessage : fallback;
+  const metadata = isRecord(details.errorMetadata) ? details.errorMetadata : undefined;
+  const code = metadata?.code;
+  const metadataMessage =
+    typeof metadata?.message === "string" && metadata.message !== message
+      ? metadata.message
+      : undefined;
+  const dataMessage =
+    isRecord(metadata?.data) &&
+    typeof metadata.data.message === "string" &&
+    metadata.data.message !== metadataMessage
+      ? metadata.data.message
+      : undefined;
+  return [
+    message,
+    code !== undefined ? `code ${String(code)}` : undefined,
+    metadataMessage,
+    dataMessage,
+  ]
+    .filter((part): part is string => part !== undefined)
+    .join(" — ");
+}
 
 const stringLength = (value: unknown): number | undefined =>
   typeof value === "string" ? value.length : undefined;
