@@ -163,6 +163,7 @@ it.layer(NodeServices.layer)("checkDroidProviderStatus", (it) => {
           },
           catalog: {
             models: Effect.succeed(catalogModels),
+            blacklistModel: () => undefined,
           },
         },
       );

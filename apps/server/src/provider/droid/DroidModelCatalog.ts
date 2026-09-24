@@ -11,6 +11,7 @@ import { REASONING_EFFORT_LABELS } from "./DroidSdkMappings.ts";
 
 const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 const CATALOG_FETCH_TIMEOUT_MS = 15_000;
+const MODEL_BLACKLIST_TTL_MS = 48 * 60 * 60 * 1000;
 
 export class DroidModelCatalogError extends Data.TaggedError("DroidModelCatalogError")<{
   readonly message: string;
@@ -62,6 +63,7 @@ export function mapDroidModelInfo(model: ModelInfo): ServerProviderModel {
 export interface DroidModelCatalog {
   /** Models reported by the installed Droid SDK, refreshed at most once a day. */
   readonly models: Effect.Effect<ReadonlyArray<ServerProviderModel>, DroidModelCatalogError>;
+  readonly blacklistModel: (modelId: string) => void;
 }
 
 export function makeDroidModelCatalog(input: {
@@ -70,12 +72,22 @@ export function makeDroidModelCatalog(input: {
   readonly listModels?: typeof listModels;
 }) {
   let cache: { fetchedAtMillis: number; models: ReadonlyArray<ServerProviderModel> } | undefined;
+  const blacklistedModels = new Map<string, number>();
   const discoverModels = input.listModels ?? listModels;
+  const filterBlacklistedModels = (
+    candidateModels: ReadonlyArray<ServerProviderModel>,
+    now: number,
+  ) => {
+    for (const [modelId, expiresAt] of blacklistedModels) {
+      if (expiresAt <= now) blacklistedModels.delete(modelId);
+    }
+    return candidateModels.filter((model) => !blacklistedModels.has(model.slug));
+  };
 
   const models = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     if (cache !== undefined && now - cache.fetchedAtMillis < CATALOG_TTL_MS) {
-      return cache.models;
+      return filterBlacklistedModels(cache.models, now);
     }
 
     const environment = Object.fromEntries(
@@ -110,8 +122,13 @@ export function makeDroidModelCatalog(input: {
     }
 
     cache = { fetchedAtMillis: now, models: fresh };
-    return fresh;
+    return filterBlacklistedModels(fresh, now);
   });
 
-  return { models } satisfies DroidModelCatalog;
+  const blacklistModel = (modelId: string): void => {
+    // @effect-diagnostics-next-line globalDate:off
+    blacklistedModels.set(modelId, Date.now() + MODEL_BLACKLIST_TTL_MS);
+  };
+
+  return { models, blacklistModel } satisfies DroidModelCatalog;
 }

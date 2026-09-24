@@ -68,6 +68,8 @@ it.effect("caches SDK model discovery for 24 hours", () =>
     yield* TestClock.setTime(24 * 60 * 60 * 1000);
     yield* catalog.models;
     assert.equal(fetches, 2);
+    catalog.blacklistModel(model.id);
+    assert.deepStrictEqual(yield* catalog.models, []);
   }),
 );
 
