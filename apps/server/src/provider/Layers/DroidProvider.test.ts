@@ -164,7 +164,6 @@ it.layer(NodeServices.layer)("checkDroidProviderStatus", (it) => {
           },
           catalog: {
             models: Effect.succeed(catalogModels),
-            blacklistModel: () => undefined,
           },
         },
       );
@@ -194,7 +193,6 @@ it.layer(NodeServices.layer)("checkDroidProviderStatus", (it) => {
                 message: "Authentication error",
               }),
             ),
-            blacklistModel: () => undefined,
           },
         },
       );

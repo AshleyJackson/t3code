@@ -61,7 +61,6 @@ import {
   debugDroidSdkMessage,
   droidErrorDetails,
   droidErrorMessage,
-  isDroidOrganizationPolicyError,
 } from "../droid/DroidDebug.ts";
 
 export type { DroidAdapterOptions } from "../droid/DroidAdapterTypes.ts";
@@ -80,11 +79,6 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       ),
     );
     const apiKey = env.FACTORY_API_KEY?.trim() || undefined;
-    const blacklistModel = (modelId: string | undefined, cause: unknown): void => {
-      if (modelId && isDroidOrganizationPolicyError(cause)) {
-        options?.onModelBlacklisted?.(modelId, droidErrorMessage(cause));
-      }
-    };
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = Effect.runPromiseWith(runtimeContext);
     const emit = (event: ProviderRuntimeEvent) =>
@@ -270,11 +264,6 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
                   modelId,
                   ...droidErrorDetails(cause),
                 });
-                blacklistModel(modelId, cause);
-                if (modelId && isDroidOrganizationPolicyError(cause)) {
-                  await resumed.close().catch(() => undefined);
-                  throw cause;
-                }
                 await resumed.close().catch(() => undefined);
                 return sdk.createSession({
                   ...commonOptions,
@@ -297,7 +286,6 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           },
           catch: (cause) => {
             const detail = droidErrorMessage(cause, "Failed to start Droid session.");
-            blacklistModel(modelId, cause);
             debugDroid("session.create.failed", {
               threadId: input.threadId,
               modelId,
@@ -590,7 +578,6 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             return;
           }
           const message = droidErrorMessage(cause, "Droid turn failed.");
-          blacklistModel(toModelId(input.modelSelection?.model), cause);
           context.activeAbort = undefined;
           updateDroidContextSession(context, {
             status: "error",

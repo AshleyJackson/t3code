@@ -51,25 +51,26 @@ it.effect("caches SDK model discovery for 24 hours", () =>
   Effect.gen(function* () {
     yield* TestClock.setTime(0);
     let fetches = 0;
+    let includeDisabled: boolean | undefined;
     const catalog = makeDroidModelCatalog({
       settings,
       environment: { FACTORY_API_KEY: "test-key" },
-      listModels: (() => {
+      listModels: ((options) => {
         fetches += 1;
+        includeDisabled = options?.includeDisabled;
         return Promise.resolve([model]);
       }) as typeof listModels,
     });
 
     const first = yield* catalog.models;
     assert.equal(fetches, 1);
+    assert.equal(includeDisabled, true);
     yield* TestClock.setTime(12 * 60 * 60 * 1000);
     assert.deepStrictEqual(yield* catalog.models, first);
     assert.equal(fetches, 1);
     yield* TestClock.setTime(24 * 60 * 60 * 1000);
     yield* catalog.models;
     assert.equal(fetches, 2);
-    catalog.blacklistModel(model.id);
-    assert.deepStrictEqual(yield* catalog.models, []);
   }),
 );
 
@@ -82,32 +83,5 @@ it.effect("fails when SDK discovery is unavailable without a cache", () =>
     });
     const failure = yield* catalog.models.pipe(Effect.flip);
     assert.equal(failure._tag, "DroidModelCatalogError");
-  }),
-);
-
-it.effect("keeps blacklisted models out of stale-cache fallbacks", () =>
-  Effect.gen(function* () {
-    yield* TestClock.setTime(0);
-    let fetches = 0;
-    const catalog = makeDroidModelCatalog({
-      settings,
-      environment: {},
-      listModels: (() => {
-        fetches += 1;
-        return fetches === 1
-          ? Promise.resolve([model])
-          : Promise.reject(new Error("Model discovery unavailable"));
-      }) as typeof listModels,
-    });
-
-    assert.deepStrictEqual(
-      (yield* catalog.models).map((entry) => entry.slug),
-      [model.id],
-    );
-    catalog.blacklistModel(model.id);
-    yield* TestClock.setTime(24 * 60 * 60 * 1000);
-
-    assert.deepStrictEqual(yield* catalog.models, []);
-    assert.equal(fetches, 2);
   }),
 );

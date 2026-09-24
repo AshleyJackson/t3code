@@ -76,12 +76,6 @@ export function droidErrorMessage(error: unknown, fallback = "Droid request fail
     .join(" — ");
 }
 
-export function isDroidOrganizationPolicyError(error: unknown): boolean {
-  return /model.*(?:not allowed|organization policy|org policy)|organization policy.*model/iu.test(
-    droidErrorMessage(error),
-  );
-}
-
 const stringLength = (value: unknown): number | undefined =>
   typeof value === "string" ? value.length : undefined;
 

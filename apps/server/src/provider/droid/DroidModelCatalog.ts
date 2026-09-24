@@ -7,11 +7,11 @@ import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
 import { buildSelectOptionDescriptor } from "../providerSnapshot.ts";
+import { debugDroid, droidErrorDetails } from "./DroidDebug.ts";
 import { REASONING_EFFORT_LABELS } from "./DroidSdkMappings.ts";
 
 const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 const CATALOG_FETCH_TIMEOUT_MS = 15_000;
-const MODEL_BLACKLIST_TTL_MS = 48 * 60 * 60 * 1000;
 
 export class DroidModelCatalogError extends Data.TaggedError("DroidModelCatalogError")<{
   readonly message: string;
@@ -63,7 +63,6 @@ export function mapDroidModelInfo(model: ModelInfo): ServerProviderModel {
 export interface DroidModelCatalog {
   /** Models reported by the installed Droid SDK, refreshed at most once a day. */
   readonly models: Effect.Effect<ReadonlyArray<ServerProviderModel>, DroidModelCatalogError>;
-  readonly blacklistModel: (modelId: string) => void;
 }
 
 export function makeDroidModelCatalog(input: {
@@ -72,22 +71,12 @@ export function makeDroidModelCatalog(input: {
   readonly listModels?: typeof listModels;
 }) {
   let cache: { fetchedAtMillis: number; models: ReadonlyArray<ServerProviderModel> } | undefined;
-  const blacklistedModels = new Map<string, number>();
   const discoverModels = input.listModels ?? listModels;
-  const filterBlacklistedModels = (
-    candidateModels: ReadonlyArray<ServerProviderModel>,
-    now: number,
-  ) => {
-    for (const [modelId, expiresAt] of blacklistedModels) {
-      if (expiresAt <= now) blacklistedModels.delete(modelId);
-    }
-    return candidateModels.filter((model) => !blacklistedModels.has(model.slug));
-  };
 
   const models = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     if (cache !== undefined && now - cache.fetchedAtMillis < CATALOG_TTL_MS) {
-      return filterBlacklistedModels(cache.models, now);
+      return cache.models;
     }
 
     const environment = Object.fromEntries(
@@ -98,7 +87,7 @@ export function makeDroidModelCatalog(input: {
     const fetched = yield* Effect.tryPromise({
       try: () =>
         discoverModels({
-          includeDisabled: false,
+          includeDisabled: true,
           execPath: input.settings.binaryPath,
           env: environment,
           ...(input.environment.FACTORY_API_KEY
@@ -111,24 +100,28 @@ export function makeDroidModelCatalog(input: {
         }),
     }).pipe(Effect.timeout(CATALOG_FETCH_TIMEOUT_MS), Effect.result);
 
-    const fresh = Result.isSuccess(fetched)
-      ? fetched.success.filter((model) => model.disabled !== true).map(mapDroidModelInfo)
-      : undefined;
+    const returnedModels = Result.isSuccess(fetched) ? fetched.success : undefined;
+    const disabledModels = returnedModels?.filter((model) => model.disabled === true) ?? [];
+    const fresh = returnedModels?.filter((model) => model.disabled !== true).map(mapDroidModelInfo);
+    if (Result.isSuccess(fetched)) {
+      debugDroid("model_catalog.discovery", {
+        returnedModelCount: fetched.success.length,
+        disabledModelCount: disabledModels.length,
+        selectableModelCount: fresh?.length ?? 0,
+      });
+    } else {
+      debugDroid("model_catalog.discovery.failed", droidErrorDetails(fetched.failure));
+    }
     if (fresh === undefined || fresh.length === 0) {
-      if (cache !== undefined) return filterBlacklistedModels(cache.models, now);
+      if (cache !== undefined) return cache.models;
       return yield* new DroidModelCatalogError({
         message: "Droid model discovery returned no selectable models.",
       });
     }
 
     cache = { fetchedAtMillis: now, models: fresh };
-    return filterBlacklistedModels(fresh, now);
+    return fresh;
   });
 
-  const blacklistModel = (modelId: string): void => {
-    // @effect-diagnostics-next-line globalDate:off
-    blacklistedModels.set(modelId, Date.now() + MODEL_BLACKLIST_TTL_MS);
-  };
-
-  return { models, blacklistModel } satisfies DroidModelCatalog;
+  return { models } satisfies DroidModelCatalog;
 }
