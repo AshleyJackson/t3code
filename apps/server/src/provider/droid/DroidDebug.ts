@@ -1,22 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off - Temporary synchronous debug-file sink.
-import { appendFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 type DebugRecord = Record<string, unknown>;
 const SENSITIVE_KEY = /api[-_]?key|authorization|cookie|password|secret|token/iu;
 
-const DROID_DEBUG_LOG_PATH = join(tmpdir(), "droid-test.log");
-
-function initializeDroidDebugLog(): void {
-  try {
-    writeFileSync(DROID_DEBUG_LOG_PATH, "");
-  } catch {
-    process.stderr.write(`[droid-debug] Could not initialize ${DROID_DEBUG_LOG_PATH}\n`);
-  }
-}
-
-initializeDroidDebugLog();
+const DROID_DEBUG_LOG_PATH = NodePath.join(NodeOS.tmpdir(), "droid-test.log");
 
 const isRecord = (value: unknown): value is DebugRecord =>
   typeof value === "object" && value !== null;
@@ -97,9 +87,9 @@ const summarizePayload = (payload: unknown): DebugRecord => {
 
 export function debugDroid(label: string, details: DebugRecord = {}): void {
   if (process.env.T3_DEBUG_DROID === "0") return;
-  const line = `[droid-debug] ${label} ${JSON.stringify(details)}\n`;
+  const line = `[${new Date().toISOString()}] [droid-debug] ${label} ${JSON.stringify(details)}\n`;
   try {
-    appendFileSync(DROID_DEBUG_LOG_PATH, line, "utf8");
+    NodeFS.appendFileSync(DROID_DEBUG_LOG_PATH, line, "utf8");
   } catch {
     process.stderr.write(`[droid-debug] Could not write ${DROID_DEBUG_LOG_PATH}\n`);
   }
