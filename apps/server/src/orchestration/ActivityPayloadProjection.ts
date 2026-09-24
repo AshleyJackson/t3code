@@ -516,6 +516,7 @@ export function projectActivityPayload(
 
   const rawOutput =
     projectRawOutput(data.rawOutput) ??
+    projectRawOutput(data.output) ??
     projectAcpContent(data.content) ??
     (payload.itemType === "command_execution" ? summarizeMcpResult(data.result) : undefined);
   if (rawOutput) {

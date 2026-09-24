@@ -408,6 +408,105 @@ it.effect("orders tool lifecycle events and ignores assistant messages without t
         toolEvents[0]?.type === "item.started" ? toolEvents[0].payload.detail : undefined,
         "Search query: Factory Droid model policy",
       );
+      NodeAssert.equal(
+        toolEvents[1]?.type === "item.completed" ? toolEvents[1].payload.detail : undefined,
+        "Search query: Factory Droid model policy",
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("presents Droid Task calls as descriptive subagent work", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-subagent-task");
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "tool_call",
+                toolUseId: "task-1",
+                name: "Task",
+                input: {
+                  description: "  Review the database\nlayer  ",
+                  prompt: "Audit the SQL changes in detail.",
+                  subagent_type: "code-reviewer",
+                },
+              },
+              {
+                type: "tool_progress",
+                toolUseId: "task-1",
+                toolName: "Task",
+                content: "Inspecting queries",
+                update: {
+                  type: "status",
+                  status: "running",
+                  fullOutput: "Inspecting queries",
+                },
+              },
+              {
+                type: "tool_result",
+                toolUseId: "task-1",
+                toolName: "Task",
+                content: "Review complete",
+                isError: false,
+              },
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "delegate this", attachments: [] });
+
+      const events = yield* joinEvents(eventsFiber);
+      const taskEvents = events.filter(
+        (event) =>
+          (event.type === "item.started" ||
+            event.type === "item.updated" ||
+            event.type === "item.completed") &&
+          String(event.itemId) === "task-1",
+      );
+      NodeAssert.deepEqual(
+        taskEvents.map((event) => event.type),
+        ["item.started", "item.updated", "item.completed"],
+      );
+      for (const event of taskEvents) {
+        if (
+          event.type === "item.started" ||
+          event.type === "item.updated" ||
+          event.type === "item.completed"
+        ) {
+          NodeAssert.equal(event.payload.itemType, "collab_agent_tool_call");
+          NodeAssert.equal(event.payload.title, "Subagent task");
+          NodeAssert.equal(event.payload.detail, "Review the database layer");
+        }
+      }
     }),
   ).pipe(Effect.provide(testLayer)),
 );

@@ -17,6 +17,7 @@ import {
   discoverDroidModels,
   makePendingDroidProvider,
 } from "./DroidProvider.ts";
+import { DroidModelCatalogError } from "../droid/DroidModelCatalog.ts";
 
 const decodeDroidSettings = Schema.decodeSync(DroidSettings);
 
@@ -173,6 +174,36 @@ it.layer(NodeServices.layer)("checkDroidProviderStatus", (it) => {
       assert.deepStrictEqual(
         snapshot.models.map((entry) => entry.slug),
         ["catalog-model"],
+      );
+    }),
+  );
+
+  it.effect("reports catalog discovery failures instead of claiming readiness", () =>
+    Effect.gen(function* () {
+      const settings = decodeDroidSettings({
+        enabled: true,
+        binaryPath: process.execPath,
+      });
+      const snapshot = yield* checkDroidProviderStatus(
+        settings,
+        {},
+        {
+          catalog: {
+            models: Effect.fail(
+              new DroidModelCatalogError({
+                message: "Authentication error",
+              }),
+            ),
+            blacklistModel: () => undefined,
+          },
+        },
+      );
+
+      assert.equal(snapshot.status, "warning");
+      assert.equal(snapshot.message, "Droid model discovery failed: Authentication error");
+      assert.deepStrictEqual(
+        snapshot.models.map((entry) => entry.slug),
+        ["default"],
       );
     }),
   );

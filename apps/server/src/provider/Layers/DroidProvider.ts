@@ -218,12 +218,11 @@ export function checkDroidProviderStatus(
 ): Effect.Effect<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   return Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    const catalogModels: Effect.Effect<ReadonlyArray<ServerProviderModel>> =
-      options?.catalog?.models.pipe(
-        Effect.orElseSucceed((): ReadonlyArray<ServerProviderModel> => []),
-      ) ?? Effect.succeed([]);
-    const fallbackModels = Effect.map(catalogModels, (models) =>
-      modelsWithSettingsFallback(models, settings),
+    const catalogModels =
+      options?.catalog?.models ?? Effect.succeed<ReadonlyArray<ServerProviderModel>>([]);
+    const fallbackModels = catalogModels.pipe(
+      Effect.orElseSucceed((): ReadonlyArray<ServerProviderModel> => []),
+      Effect.map((models) => modelsWithSettingsFallback(models, settings)),
     );
 
     if (!settings.enabled) {
@@ -290,13 +289,17 @@ export function checkDroidProviderStatus(
       commandResult.code === 0 &&
       (Result.isFailure(discoveredModels) ||
         (Result.isSuccess(discoveredModels) && Option.isNone(discoveredModels.success)));
-    const discoveryMessage = modelDiscoveryFailed
-      ? "Timed out while discovering Droid models."
-      : undefined;
+    const discoveryMessage = Result.isFailure(discoveredModels)
+      ? discoveredModels.failure.message
+      : modelDiscoveryFailed
+        ? "Timed out while discovering Droid models."
+        : undefined;
     const models =
       Result.isSuccess(discoveredModels) && Option.isSome(discoveredModels.success)
         ? modelsWithSettingsFallback(discoveredModels.success.value, settings)
-        : yield* fallbackModels;
+        : commandResult.code === 0
+          ? modelsWithSettingsFallback([], settings)
+          : yield* fallbackModels;
 
     return buildServerProvider({
       presentation: DROID_PRESENTATION,

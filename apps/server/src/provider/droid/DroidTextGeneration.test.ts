@@ -1,12 +1,44 @@
-import { describe, expect, it } from "vite-plus/test";
+import {
+  AutonomyLevel,
+  ReasoningEffort,
+  type CreateSessionOptions,
+  type DroidSession,
+  type DroidStreamEvent,
+} from "@factory/droid-sdk/node";
+import { DroidSettings, ProviderInstanceId } from "@t3tools/contracts";
+import { createModelSelection } from "@t3tools/shared/model";
+import { describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
 
 import {
   collectDroidResponseText,
+  makeDroidTextGeneration,
   parseDroidBranchName,
   parseDroidCommitMessage,
   parseDroidPrContent,
   parseDroidThreadTitle,
 } from "./DroidTextGeneration.ts";
+
+const settings = DroidSettings.make({
+  enabled: true,
+  binaryPath: "fake-droid",
+  customModels: [],
+});
+
+function fakeSession(
+  messages: ReadonlyArray<DroidStreamEvent>,
+  onClose?: () => void,
+): DroidSession {
+  return {
+    id: "droid-text-generation-test",
+    stream: async function* () {
+      for (const message of messages) {
+        yield message;
+      }
+    },
+    close: async () => onClose?.(),
+  } as unknown as DroidSession;
+}
 
 describe("parseDroidThreadTitle", () => {
   it("prefers the complete result text over partial assistant deltas", () => {
@@ -76,4 +108,91 @@ describe("parseDroidThreadTitle", () => {
       branch: "fix/title-generation",
     });
   });
+
+  it.effect("uses safe session settings and forwards explicit model options", () =>
+    Effect.gen(function* () {
+      let receivedOptions: CreateSessionOptions | undefined;
+      let closed = false;
+      const textGeneration = makeDroidTextGeneration({
+        settings,
+        environment: {},
+        createSession: async (options) => {
+          receivedOptions = options;
+          return fakeSession(
+            [
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "s1",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: '{"title":"Safe metadata generation","needsRefinement":false}',
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ],
+            () => {
+              closed = true;
+            },
+          );
+        },
+      });
+
+      const result = yield* textGeneration.generateThreadTitle({
+        cwd: process.cwd(),
+        message: "Generate a title",
+        modelSelection: createModelSelection(ProviderInstanceId.make("droid"), "default", [
+          { id: "reasoningEffort", value: "xhigh" },
+        ]),
+      });
+
+      expect(result.title).toBe("Safe metadata generation");
+      expect(receivedOptions).toMatchObject({
+        autonomyLevel: AutonomyLevel.Off,
+        autoRejectPermissionRequests: true,
+        reasoningEffort: ReasoningEffort.ExtraHigh,
+      });
+      expect(receivedOptions).not.toHaveProperty("modelId");
+      expect(closed).toBe(true);
+    }),
+  );
+
+  it.effect("rejects unsuccessful terminal results even when they contain usable text", () =>
+    Effect.gen(function* () {
+      const textGeneration = makeDroidTextGeneration({
+        settings,
+        environment: {},
+        createSession: async () =>
+          fakeSession([
+            {
+              type: "result",
+              subtype: "error_during_execution",
+              sessionId: "s1",
+              durationMs: 1,
+              tokenUsage: null,
+              messages: [],
+              text: '{"title":"Do not accept this","needsRefinement":false}',
+              turnCount: 1,
+              success: false,
+              interrupted: false,
+              error: null,
+            },
+          ]),
+      });
+
+      const failure = yield* textGeneration
+        .generateThreadTitle({
+          cwd: process.cwd(),
+          message: "Generate a title",
+          modelSelection: createModelSelection(ProviderInstanceId.make("droid"), "default"),
+        })
+        .pipe(Effect.flip);
+
+      expect(failure._tag).toBe("TextGenerationError");
+      expect(failure.detail).toBe("Droid text generation failed.");
+    }),
+  );
 });
