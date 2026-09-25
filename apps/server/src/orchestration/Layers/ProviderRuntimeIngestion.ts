@@ -382,25 +382,6 @@ function compactedTokenCountsFromActivities(
   return { beforeTokens, afterTokens };
 }
 
-function compactionTokenPayload(
-  beforeTokens: number | undefined,
-  afterTokens: number | undefined,
-): { readonly beforeTokens?: number; readonly afterTokens?: number } {
-  if (beforeTokens !== undefined && afterTokens !== undefined) {
-    return Number.isFinite(beforeTokens) &&
-      Number.isFinite(afterTokens) &&
-      beforeTokens >= 0 &&
-      afterTokens >= 0 &&
-      afterTokens < beforeTokens
-      ? { beforeTokens, afterTokens }
-      : {};
-  }
-  return {
-    ...(beforeTokens !== undefined ? { beforeTokens } : {}),
-    ...(afterTokens !== undefined ? { afterTokens } : {}),
-  };
-}
-
 function normalizeRuntimeTurnState(
   value: string | undefined,
 ): "completed" | "failed" | "interrupted" | "cancelled" {
@@ -904,10 +885,9 @@ export function runtimeEventToActivities(
 
       const beforeTokens = event.payload.beforeTokens;
       const afterTokens = event.payload.afterTokens;
-      const tokenPayload = compactionTokenPayload(beforeTokens, afterTokens);
       const summary =
-        tokenPayload.beforeTokens !== undefined && tokenPayload.afterTokens !== undefined
-          ? `Compacted context ${formatTokens(tokenPayload.beforeTokens)} → ${formatTokens(tokenPayload.afterTokens)} tokens`
+        beforeTokens !== undefined && afterTokens !== undefined
+          ? `Compacted context ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens`
           : "Context compacted";
       return [
         {
@@ -918,7 +898,8 @@ export function runtimeEventToActivities(
           summary,
           payload: {
             state: event.payload.state,
-            ...tokenPayload,
+            ...(beforeTokens !== undefined ? { beforeTokens } : {}),
+            ...(afterTokens !== undefined ? { afterTokens } : {}),
             ...(event.requestId !== undefined ? { requestId: event.requestId } : {}),
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
           },
