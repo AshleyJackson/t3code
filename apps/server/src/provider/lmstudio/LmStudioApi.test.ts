@@ -166,4 +166,65 @@ describe("LM Studio API validation", () => {
       vi.unstubAllGlobals();
     }),
   );
+
+  it.effect("sends tools and exposes streamed tool and reasoning deltas", () =>
+    Effect.gen(function* () {
+      let requestBody: unknown;
+      vi.stubGlobal("fetch", (_input: string | URL, init?: RequestInit) => {
+        requestBody = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+        return Promise.resolve(
+          new Response(
+            [
+              'data: {"choices":[{"delta":{"reasoning_content":"Inspecting files.","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}]}}]}',
+              "",
+              'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+              "",
+              "data: [DONE]",
+              "",
+            ].join("\n"),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          ),
+        );
+      });
+      const events = yield* streamLmStudioChat({
+        baseUrl: "http://127.0.0.1:1234",
+        apiKey: "",
+        model: "qwen/model",
+        messages: [{ role: "user", content: "inspect the project" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read_file",
+              description: "Read a file",
+              parameters: { type: "object" },
+            },
+          },
+        ],
+      }).pipe(Stream.runCollect);
+      expect(requestBody).toEqual({
+        model: "qwen/model",
+        messages: [{ role: "user", content: "inspect the project" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read_file",
+              description: "Read a file",
+              parameters: { type: "object" },
+            },
+          },
+        ],
+        tool_choice: "auto",
+        stream: true,
+      });
+      expect(events[0]).toMatchObject({
+        reasoningDelta: "Inspecting files.",
+        toolCalls: [
+          { index: 0, id: "call_1", name: "read_file", arguments: '{"path":"README.md"}' },
+        ],
+      });
+      vi.unstubAllGlobals();
+    }),
+  );
 });

@@ -12,13 +12,46 @@ export class LmStudioApiError extends Schema.TaggedError<LmStudioApiError>()("Lm
   }
 }
 
+export interface LmStudioToolCall {
+  readonly id: string;
+  readonly type: "function";
+  readonly function: {
+    readonly name: string;
+    readonly arguments: string;
+  };
+}
+
+export interface LmStudioTool {
+  readonly type: "function";
+  readonly function: {
+    readonly name: string;
+    readonly description: string;
+    readonly parameters: Record<string, unknown>;
+  };
+}
+
+export type LmStudioContentPart =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "image_url"; readonly image_url: { readonly url: string } };
+
 export interface LmStudioMessage {
-  readonly role: "system" | "user" | "assistant";
-  readonly content: string;
+  readonly role: "system" | "user" | "assistant" | "tool";
+  readonly content: string | ReadonlyArray<LmStudioContentPart>;
+  readonly tool_calls?: ReadonlyArray<LmStudioToolCall>;
+  readonly tool_call_id?: string;
+}
+
+export interface LmStudioToolCallDelta {
+  readonly index: number;
+  readonly id?: string;
+  readonly name?: string;
+  readonly arguments?: string;
 }
 
 export interface LmStudioStreamEvent {
   readonly delta: string;
+  readonly reasoningDelta?: string;
+  readonly toolCalls?: ReadonlyArray<LmStudioToolCallDelta>;
   readonly done: boolean;
   readonly finishReason?: string;
   readonly promptTokens?: number;
@@ -38,6 +71,23 @@ const ChatStreamEvent = Schema.Struct({
       delta: Schema.optional(
         Schema.Struct({
           content: Schema.optional(Schema.String),
+          reasoning_content: Schema.optional(Schema.String),
+          reasoning: Schema.optional(Schema.String),
+          tool_calls: Schema.optional(
+            Schema.Array(
+              Schema.Struct({
+                index: Schema.Number,
+                id: Schema.optional(Schema.String),
+                type: Schema.optional(Schema.String),
+                function: Schema.optional(
+                  Schema.Struct({
+                    name: Schema.optional(Schema.String),
+                    arguments: Schema.optional(Schema.String),
+                  }),
+                ),
+              }),
+            ),
+          ),
         }),
       ),
       finish_reason: Schema.optional(Schema.NullOr(Schema.String)),
@@ -130,6 +180,7 @@ export const streamLmStudioChat = (input: {
   readonly apiKey: string;
   readonly model: string;
   readonly messages: ReadonlyArray<LmStudioMessage>;
+  readonly tools?: ReadonlyArray<LmStudioTool>;
   readonly signal?: AbortSignal;
 }) => {
   const events = async function* (): AsyncGenerator<LmStudioStreamEvent> {
@@ -143,6 +194,7 @@ export const streamLmStudioChat = (input: {
       body: JSON.stringify({
         model: input.model,
         messages: input.messages,
+        ...(input.tools?.length ? { tools: input.tools, tool_choice: "auto" } : {}),
         stream: true,
       }),
       ...(input.signal ? { signal: input.signal } : {}),
@@ -179,9 +231,19 @@ export const streamLmStudioChat = (input: {
       const decoded = Schema.decodeUnknownSync(ChatStreamEvent)(raw);
       const choice = decoded.choices[0];
       const delta = choice?.delta?.content ?? "";
+      const reasoningDelta =
+        choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? undefined;
+      const toolCalls = choice?.delta?.tool_calls?.map((toolCall) => ({
+        index: toolCall.index,
+        ...(toolCall.id ? { id: toolCall.id } : {}),
+        ...(toolCall.function?.name ? { name: toolCall.function.name } : {}),
+        ...(toolCall.function?.arguments ? { arguments: toolCall.function.arguments } : {}),
+      }));
       const finishReason = choice?.finish_reason ?? undefined;
       return {
         delta,
+        ...(reasoningDelta ? { reasoningDelta } : {}),
+        ...(toolCalls?.length ? { toolCalls } : {}),
         done: finishReason !== undefined || sawDone,
         ...(finishReason ? { finishReason } : {}),
         ...(typeof decoded.usage?.prompt_tokens === "number"
