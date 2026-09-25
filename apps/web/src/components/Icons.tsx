@@ -875,4 +875,3 @@ export const DroidIcon: Icon = (props) => (
     />
   </svg>
 );
-
