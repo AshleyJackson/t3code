@@ -514,8 +514,8 @@ importers:
         specifier: 4.0.0-rc.115
         version: 4.0.0-rc.115(bufferutil@4.1.0)(effect@4.0.0-rc.115(patch_hash=0dfc4bb8ebd80fb3e06b91ef61346f5259517ab0f2437644fe95ae531084b1f5))(utf-8-validate@6.0.6)
       '@factory/droid-sdk':
-        specifier: 0.8.0
-        version: 0.8.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
+        specifier: 0.9.1
+        version: 0.9.1(bufferutil@4.1.0)(utf-8-validate@6.0.6)
       '@ff-labs/fff-node':
         specifier: 0.9.4
         version: 0.9.4(patch_hash=c4e3cc2420ceb9dc650f9d189e9c24baf7e83f342998bacda5f459a4ce7927a8)
@@ -2852,8 +2852,8 @@ packages:
     resolution: {integrity: sha512-4aQzz9vgxcNXFfo/iyNgDDYfsU5XGKKxWxZopw0cVotHiW+U8IJbIxMaxsINs6bHhtkG3StKNPcOrn3eBuxKPw==}
     hasBin: true
 
-  '@factory/droid-sdk@0.8.0':
-    resolution: {integrity: sha512-qiIjUTmYEuhwAkobRkUryBdQD2V31nBWIVBe5AxjsT8g57B6QpR/oI0H6apvIm/0Dpmi+sbZq5zC4l+OLIndqg==}
+  '@factory/droid-sdk@0.9.1':
+    resolution: {integrity: sha512-KhMAQQejZWt4jTobuE1QK0UQIc+JtRvm4NcocyaFayE7RQIdsQM0d5ClfcrOvxjND9BYLq1f45KjySjREzJUwQ==}
     engines: {node: '>=18.0.0'}
 
   '@ff-labs/fff-bin-darwin-arm64@0.9.4':
@@ -13480,7 +13480,7 @@ snapshots:
       chalk: 4.1.2
       js-yaml: 4.3.2
 
-  '@factory/droid-sdk@0.8.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)':
+  '@factory/droid-sdk@0.9.1(bufferutil@4.1.0)(utf-8-validate@6.0.6)':
     dependencies:
       '@modelcontextprotocol/sdk': 1.29.0(zod@3.25.76)
       '@opentelemetry/api': 1.9.1

@@ -5139,6 +5139,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           )}
         >
           <CompactComposerControlsMenu
+            provider={selectedProvider}
             interactionMode={interactionMode}
             runtimeMode={runtimeMode}
             size={composerControlsInStrip ? "xs" : "sm"}
