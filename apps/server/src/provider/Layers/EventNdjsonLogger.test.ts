@@ -312,6 +312,11 @@ describe("EventNdjsonLogger", () => {
           threadId,
         );
         yield* native.write(
+          { method: "command/exec/outputDelta", payload: circularDelta },
+          threadId,
+        );
+        yield* native.write({ method: "process/outputDelta", payload: circularDelta }, threadId);
+        yield* native.write(
           { method: "thread/realtime/outputAudio/delta", payload: circularDelta },
           threadId,
         );

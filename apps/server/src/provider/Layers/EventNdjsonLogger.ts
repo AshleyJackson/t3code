@@ -55,6 +55,8 @@ const transientNativeMethods = new Set([
   "item/plan/delta",
   "item/reasoning/summaryTextDelta",
   "item/reasoning/textDelta",
+  "command/exec/outputDelta",
+  "process/outputDelta",
   "thread/realtime/outputAudio/delta",
   "thread/realtime/transcript/delta",
   "turn/diff/updated",
