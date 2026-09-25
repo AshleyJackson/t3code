@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
@@ -23,6 +24,7 @@ import {
 import { withInstanceIdentity } from "./instanceIdentity.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { makeDroidModelCatalog } from "../droid/DroidModelCatalog.ts";
+import { resolveDroidExecutablePath } from "./DroidExecutable.ts";
 
 const decodeDroidSettings = Schema.decodeSync(DroidSettings);
 const DRIVER_KIND = ProviderDriverKind.make("droid");
@@ -51,6 +53,12 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const processEnv = mergeProviderInstanceEnvironment(environment);
+      const hostPlatform = yield* HostProcessPlatform;
+      const executablePath = resolveDroidExecutablePath(
+        config.binaryPath,
+        processEnv,
+        hostPlatform,
+      );
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -62,7 +70,11 @@ export const DroidDriver: ProviderDriver<DroidSettings, DroidDriverEnv> = {
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
-      const effectiveConfig = { ...config, enabled } satisfies DroidSettings;
+      const effectiveConfig = {
+        ...config,
+        binaryPath: executablePath,
+        enabled,
+      } satisfies DroidSettings;
       const adapter = yield* makeDroidAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
