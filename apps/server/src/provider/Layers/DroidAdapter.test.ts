@@ -4,7 +4,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AutonomyLevel,
   DroidInteractionMode,
+  McpServerStatus,
+  McpServerType,
   ReasoningEffort,
+  SettingsLevel,
+  SkillLocation,
   ToolConfirmationOutcome,
   ToolConfirmationType,
 } from "@factory/droid-sdk";
@@ -71,6 +75,10 @@ function fakeSession(
       readonly session: DroidSession;
       readonly removedCount: number;
     }>;
+    readonly onListMcpServers?: () => Promise<Awaited<ReturnType<DroidSession["listMcpServers"]>>>;
+    readonly onListMcpTools?: () => Promise<Awaited<ReturnType<DroidSession["listMcpTools"]>>>;
+    readonly onListTools?: () => Promise<Awaited<ReturnType<DroidSession["listTools"]>>>;
+    readonly onListSkills?: () => Promise<Awaited<ReturnType<DroidSession["listSkills"]>>>;
     readonly id?: string;
   },
 ): DroidSession {
@@ -97,6 +105,15 @@ function fakeSession(
     ...(hooks?.onNotification ? { onNotification: hooks.onNotification } : {}),
     ...(hooks?.getContextStats ? { getContextStats: hooks.getContextStats } : {}),
     ...(hooks?.onCompact ? { compact: hooks.onCompact } : {}),
+    listMcpServers:
+      hooks?.onListMcpServers ??
+      (async () => ({
+        servers: [],
+        summary: { total: 0, connected: 0, connecting: 0, failed: 0 },
+      })),
+    listMcpTools: hooks?.onListMcpTools ?? (async () => []),
+    listTools: hooks?.onListTools ?? (async () => []),
+    listSkills: hooks?.onListSkills ?? (async () => ({ skills: [] })),
     updateSettings: async (params: Parameters<DroidSession["updateSettings"]>[0]) => {
       sessionSettings = { ...sessionSettings, ...params } as DroidSession["settings"];
       return {} as never;
@@ -302,6 +319,111 @@ it.effect("injects the prepared T3 MCP server and device environment", () =>
         "1",
       );
       clearMcpProviderSession(threadId);
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("discovers Droid MCP, native tools, and skills through diagnostics", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-discovery");
+      let mcpServerCalls = 0;
+      let mcpToolCalls = 0;
+      let nativeToolCalls = 0;
+      let skillCalls = 0;
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([], {
+              id: "droid-discovery-session",
+              onListMcpServers: async () => {
+                mcpServerCalls += 1;
+                return {
+                  servers: [
+                    {
+                      name: "t3-code",
+                      status: McpServerStatus.Connected,
+                      source: SettingsLevel.Project,
+                      isManaged: true,
+                      serverType: McpServerType.Http,
+                      toolCount: 1,
+                    },
+                  ],
+                  summary: { total: 1, connected: 1, connecting: 0, failed: 0 },
+                };
+              },
+              onListMcpTools: async () => {
+                mcpToolCalls += 1;
+                return [
+                  {
+                    serverName: "t3-code",
+                    name: "preview.open",
+                    isEnabled: true,
+                    isReadOnly: true,
+                  },
+                ];
+              },
+              onListTools: async () => {
+                nativeToolCalls += 1;
+                return [
+                  {
+                    id: "read",
+                    displayName: "Read",
+                    description: "Read a file",
+                    category: "read",
+                    defaultAllowed: true,
+                    allowed: true,
+                  },
+                ];
+              },
+              onListSkills: async () => {
+                skillCalls += 1;
+                return {
+                  skills: [
+                    {
+                      name: "review",
+                      filePath: "C:\\skills\\review\\SKILL.md",
+                      location: SkillLocation.Project,
+                      enabled: true,
+                      content: "private skill content",
+                    },
+                  ],
+                };
+              },
+            }),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const diagnostics = yield* adapter.diagnostics.discover(threadId);
+
+      NodeAssert.deepEqual(
+        {
+          sessionId: diagnostics.sessionId,
+          serverNames: diagnostics.mcpServers.map((server) => server.name),
+          mcpToolNames: diagnostics.mcpTools.map((tool) => tool.name),
+          nativeToolIds: diagnostics.nativeTools.map((tool) => tool.id),
+          skillNames: diagnostics.skills.map((skill) => skill.name),
+        },
+        {
+          sessionId: "droid-discovery-session",
+          serverNames: ["t3-code"],
+          mcpToolNames: ["preview.open"],
+          nativeToolIds: ["read"],
+          skillNames: ["review"],
+        },
+      );
+      NodeAssert.equal("content" in (diagnostics.skills[0] ?? {}), false);
+      NodeAssert.equal(mcpServerCalls, 1);
+      NodeAssert.equal(mcpToolCalls, 1);
+      NodeAssert.equal(nativeToolCalls, 1);
+      NodeAssert.equal(skillCalls, 1);
     }),
   ).pipe(Effect.provide(testLayer)),
 );

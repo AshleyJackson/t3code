@@ -58,6 +58,19 @@ export const providerRuntimeEventsTotal = Metric.counter("t3_provider_runtime_ev
   description: "Total canonical provider runtime events processed.",
 });
 
+export const droidSdkLogEventsTotal = Metric.counter("t3_droid_sdk_log_events_total", {
+  description: "Total structured log events emitted by the Droid SDK.",
+});
+
+export const droidSdkMetricEventsTotal = Metric.counter("t3_droid_sdk_metric_events_total", {
+  description: "Total metric events emitted by the Droid SDK.",
+});
+
+export const droidSdkMetricValues = Metric.histogram("t3_droid_sdk_metric_values", {
+  description: "Values reported by the Droid SDK metric sink.",
+  boundaries: [1, 5, 10, 25, 100, 250, 1_000, 5_000, 10_000, 60_000],
+});
+
 export const gitCommandsTotal = Metric.counter("t3_git_commands_total", {
   description: "Total git commands executed by the server runtime.",
 });

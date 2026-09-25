@@ -78,6 +78,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { DROID_PROVIDER, type DroidAdapterShape } from "../droid/DroidAdapterTypes.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
@@ -104,6 +105,7 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+const DROID_INSTANCE_ID = ProviderInstanceId.make("droid");
 
 const assistantQuoteText = 'Keep the shared parser for "résumé".\nPreserve line breaks.';
 const assistantCitation = {
@@ -333,6 +335,31 @@ function makeFakeCodexAdapter(
     rollbackThread,
     uploadFeedback,
     stopAll,
+  };
+}
+
+function makeFakeDroidAdapter() {
+  const base = makeFakeCodexAdapter(DROID_PROVIDER);
+  const discover = vi.fn((threadId: ThreadId) =>
+    Effect.succeed({
+      sessionId: `droid-session-${String(threadId)}`,
+      capturedAt: "2026-01-01T00:00:00.000Z",
+      mcpServers: [],
+      mcpSummary: { total: 0, connected: 0, connecting: 0, failed: 0 },
+      mcpTools: [],
+      nativeTools: [],
+      skills: [],
+    }),
+  );
+  const adapter: DroidAdapterShape = {
+    ...base.adapter,
+    diagnostics: { discover },
+  };
+
+  return {
+    ...base,
+    adapter,
+    discover,
   };
 }
 
@@ -987,6 +1014,59 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
 );
 
 const routing = makeProviderServiceLayer();
+const droidDiagnostics = makeFakeDroidAdapter();
+const nonDroidDiagnostics = makeFakeCodexAdapter(CODEX_DRIVER);
+const droidDiagnosticsRouting = makeProviderServiceLayer({
+  registry: makeAdapterRegistryMock({
+    [DROID_PROVIDER]: droidDiagnostics.adapter,
+    [CODEX_DRIVER]: nonDroidDiagnostics.adapter,
+  }),
+});
+
+droidDiagnosticsRouting.layer("ProviderService Droid diagnostics", (it) => {
+  it.effect("delegates diagnostics to the active Droid adapter", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("droid-diagnostics");
+
+      yield* provider.startSession(threadId, {
+        provider: DROID_PROVIDER,
+        providerInstanceId: DROID_INSTANCE_ID,
+        threadId,
+        runtimeMode: "full-access",
+        cwd: fixtureCwd("droid-diagnostics"),
+      });
+
+      const diagnostics = yield* provider.getDroidSessionDiagnostics(threadId);
+
+      assert.equal(diagnostics.sessionId, `droid-session-${String(threadId)}`);
+      assert.equal(droidDiagnostics.discover.mock.calls.length, 1);
+      assert.equal(droidDiagnostics.discover.mock.calls[0]?.[0], threadId);
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("rejects diagnostics for non-Droid providers", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("codex-diagnostics");
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+        cwd: fixtureCwd("codex-diagnostics"),
+      });
+
+      const failure = yield* Effect.flip(provider.getDroidSessionDiagnostics(threadId));
+
+      assert.instanceOf(failure, ProviderValidationError);
+      assert.include(failure.issue, "does not expose Droid diagnostics");
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+});
 
 const customCompactionDriver = ProviderDriverKind.make("custom-compaction-provider");
 const nativeCompactionInstanceId = ProviderInstanceId.make("native-compaction");

@@ -32,6 +32,7 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
+import type { DroidDiscoverySnapshot } from "../droid/DroidAdapterTypes.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
@@ -105,6 +106,14 @@ export interface ProviderServiceShape {
   readonly getInstanceInfo: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
+
+  /**
+   * Read Droid-only MCP, native-tool, and skill diagnostics for an active
+   * session. This is intentionally not part of the transport contract.
+   */
+  readonly getDroidSessionDiagnostics: (
+    threadId: ThreadId,
+  ) => Effect.Effect<DroidDiscoverySnapshot, ProviderServiceError>;
 
   /**
    * Reject unsupported rewind before files change, without resuming the session.

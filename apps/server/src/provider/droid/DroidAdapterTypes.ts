@@ -3,6 +3,7 @@ import type {
   AskUserResult,
   CreateSessionOptions,
   DroidSession,
+  DroidObservability,
   RequestPermissionHandlerResult,
   ResumeSessionOptions,
 } from "@factory/droid-sdk/node";
@@ -13,12 +14,14 @@ import {
   type ProviderInstanceId,
   type ProviderSession,
   type ThreadTokenUsageSnapshot,
+  type ThreadId,
   type TurnId,
   type UserInputQuestion,
 } from "@t3tools/contracts";
 
 import type { ProviderAdapterError } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type * as Effect from "effect/Effect";
 
 export const DROID_PROVIDER = ProviderDriverKind.make("droid");
 
@@ -63,9 +66,38 @@ export interface DroidContext {
   pendingCompactionNotification: Record<string, unknown> | undefined;
 }
 
+export type DroidMcpServerDiagnostic = Awaited<
+  ReturnType<DroidSession["listMcpServers"]>
+>["servers"][number];
+export type DroidMcpServerSummary = Awaited<ReturnType<DroidSession["listMcpServers"]>>["summary"];
+export type DroidMcpToolDiagnostic = Awaited<ReturnType<DroidSession["listMcpTools"]>>[number];
+export type DroidNativeToolDiagnostic = Awaited<ReturnType<DroidSession["listTools"]>>[number];
+export type DroidSkillDiagnostic = Omit<
+  Awaited<ReturnType<DroidSession["listSkills"]>>["skills"][number],
+  "content"
+>;
+
+export interface DroidDiscoverySnapshot {
+  readonly sessionId: string;
+  readonly capturedAt: string;
+  readonly mcpServers: ReadonlyArray<DroidMcpServerDiagnostic>;
+  readonly mcpSummary: DroidMcpServerSummary;
+  readonly mcpTools: ReadonlyArray<DroidMcpToolDiagnostic>;
+  readonly nativeTools: ReadonlyArray<DroidNativeToolDiagnostic>;
+  /** Skill content is intentionally omitted from diagnostics. */
+  readonly skills: ReadonlyArray<DroidSkillDiagnostic>;
+}
+
+export interface DroidDiagnostics {
+  readonly discover: (
+    threadId: ThreadId,
+  ) => Effect.Effect<DroidDiscoverySnapshot, ProviderAdapterError>;
+}
+
 export interface DroidAdapterOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly observability?: DroidObservability;
   readonly sdk?: {
     readonly createSession: (options?: CreateSessionOptions) => Promise<DroidSession>;
     readonly resumeSession: (
@@ -75,4 +107,6 @@ export interface DroidAdapterOptions {
   };
 }
 
-export type DroidAdapterShape = ProviderAdapterShape<ProviderAdapterError>;
+export interface DroidAdapterShape extends ProviderAdapterShape<ProviderAdapterError> {
+  readonly diagnostics: DroidDiagnostics;
+}
