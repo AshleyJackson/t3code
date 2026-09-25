@@ -6,7 +6,6 @@ import {
   DroidSettings,
   GrokSettings,
   OpenCodeSettings,
-  LmStudioSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
 import type * as Schema from "effect/Schema";
@@ -78,12 +77,6 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     label: "OpenCode",
     icon: OpenCodeIcon,
     settingsSchema: OpenCodeSettings,
-  },
-  {
-    value: ProviderDriverKind.make("lmstudio"),
-    label: "LM Studio",
-    icon: OpenAI,
-    settingsSchema: LmStudioSettings,
   },
   {
     value: ProviderDriverKind.make("antigravity"),

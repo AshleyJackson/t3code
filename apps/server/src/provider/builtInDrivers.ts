@@ -27,7 +27,6 @@ import { DroidDriver, type DroidDriverEnv } from "./Drivers/DroidDriver.ts";
 import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "./Drivers/OpenCodeDriver.ts";
 import { AntigravityDriver, type AntigravityDriverEnv } from "./Drivers/AntigravityDriver.ts";
-import { LmStudioDriver, type LmStudioDriverEnv } from "./Drivers/LmStudioDriver.ts";
 import type { AnyProviderDriver } from "./ProviderDriver.ts";
 
 /**
@@ -42,8 +41,7 @@ export type BuiltInDriversEnv =
   | DroidDriverEnv
   | GrokDriverEnv
   | OpenCodeDriverEnv
-  | AntigravityDriverEnv
-  | LmStudioDriverEnv;
+  | AntigravityDriverEnv;
 
 /**
  * Ordered list of built-in drivers. Order matters only for tie-breaking in
@@ -58,5 +56,4 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
   GrokDriver,
   OpenCodeDriver,
   AntigravityDriver,
-  LmStudioDriver,
 ];

@@ -906,69 +906,6 @@ export const DroidSettings = makeProviderSettingsSchema(
 );
 export type DroidSettings = typeof DroidSettings.Type;
 
-const LM_STUDIO_BASE_URL_PATTERN = /^https?:\/\/[^/?#\s]+(?:\/[^?#\s]*)?$/i;
-const LmStudioBaseUrl = TrimmedString.check(
-  Schema.isMaxLength(2_048),
-  Schema.isPattern(LM_STUDIO_BASE_URL_PATTERN),
-  Schema.makeFilter(
-    (value) => {
-      try {
-        const url = new URL(value);
-        return (
-          (url.protocol === "http:" || url.protocol === "https:") &&
-          url.username.length === 0 &&
-          url.password.length === 0 &&
-          url.search.length === 0 &&
-          url.hash.length === 0 &&
-          !url.pathname.endsWith("/v1") &&
-          !url.pathname.endsWith("/api/v1")
-        );
-      } catch {
-        return false;
-      }
-    },
-    { description: "Expected an HTTP(S) LM Studio server URL without an API path." },
-  ),
-);
-
-export const LmStudioSettings = makeProviderSettingsSchema(
-  {
-    enabled: Schema.Boolean.pipe(
-      Schema.withDecodingDefault(Effect.succeed(false)),
-      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
-    ),
-    baseUrl: LmStudioBaseUrl.pipe(
-      Schema.withDecodingDefault(Effect.succeed("http://127.0.0.1:1234")),
-      Schema.annotateKey({
-        title: "Server URL",
-        description: "The LM Studio server URL.",
-        providerSettingsForm: {
-          placeholder: "http://127.0.0.1:1234",
-          clearWhenEmpty: "persist",
-        },
-      }),
-    ),
-    apiKey: TrimmedString.check(Schema.isMaxLength(512)).pipe(
-      Schema.withDecodingDefault(Effect.succeed("")),
-      Schema.annotateKey({
-        title: "API key",
-        description: "Optional LM Studio API token.",
-        providerSettingsForm: {
-          control: "password",
-          placeholder: "Optional",
-          clearWhenEmpty: "omit",
-        },
-      }),
-    ),
-    customModels: Schema.Array(CustomModelSetting).pipe(
-      Schema.withDecodingDefault(Effect.succeed([])),
-      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
-    ),
-  },
-  { order: ["baseUrl", "apiKey"] },
-);
-export type LmStudioSettings = typeof LmStudioSettings.Type;
-
 /**
  * A read-only quota source outside this environment's provider CLIs. The
  * only kind today is a CLIProxyAPI hub, whose management API reports the
