@@ -31,6 +31,7 @@ import type { ProviderThreadSnapshot } from "../Services/ProviderAdapter.ts";
 
 const PROVIDER = ProviderDriverKind.make("lmstudio");
 const RESUME_VERSION = 1;
+const WORKSPACE_CONTEXT_PREFIX = "The current working directory for this conversation is: ";
 
 interface Context {
   session: ProviderSession;
@@ -42,6 +43,25 @@ interface Context {
 
 const now = () => new Date().toISOString();
 const eventId = () => EventId.make(`lmstudio-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+function addWorkspaceContext(
+  messages: ReadonlyArray<LmStudioMessage>,
+  cwd: string | undefined,
+): LmStudioMessage[] {
+  const withoutPreviousWorkspaceContext = messages.filter(
+    (message) =>
+      message.role !== "system" || !message.content.startsWith(WORKSPACE_CONTEXT_PREFIX),
+  );
+  return cwd
+    ? [
+        {
+          role: "system",
+          content: `${WORKSPACE_CONTEXT_PREFIX}${cwd}. When the user refers to this folder or project, use this path.`,
+        },
+        ...withoutPreviousWorkspaceContext,
+      ]
+    : withoutPreviousWorkspaceContext;
+}
 
 export function makeLmStudioAdapter(
   settings: LmStudioSettings,
@@ -73,10 +93,11 @@ export function makeLmStudioAdapter(
           typeof input.resumeCursor === "object" && input.resumeCursor !== null
             ? (input.resumeCursor as { schemaVersion?: unknown; messages?: unknown })
             : undefined;
-        const messages =
+        const resumedMessages =
           cursor?.schemaVersion === RESUME_VERSION && Array.isArray(cursor.messages)
             ? (cursor.messages as LmStudioMessage[])
             : [];
+        const messages = addWorkspaceContext(resumedMessages, input.cwd);
         const session: ProviderSession = {
           provider: PROVIDER,
           providerInstanceId: instanceId,
