@@ -21,6 +21,7 @@ import {
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
@@ -37,6 +38,7 @@ import {
   type DroidAdapterShape,
   type DroidContext,
 } from "../droid/DroidAdapterTypes.ts";
+import { makeDroidObservability } from "../droid/DroidObservability.ts";
 import {
   completeDroidContentItem,
   handleDroidNotification,
@@ -293,6 +295,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             (entry): entry is [string, string] => typeof entry[1] === "string",
           ),
         );
+        const parentSpan = yield* Effect.currentSpan.pipe(Effect.option);
+        const observability =
+          options?.observability ??
+          makeDroidObservability(runtimeContext, Option.getOrUndefined(parentSpan));
         const commonOptions = {
           execPath: settings.binaryPath,
           env: sessionEnvironment,
@@ -316,6 +322,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             : {}),
           permissionHandler,
           askUserHandler,
+          observability,
         };
         debugDroid("session.create.begin", {
           threadId: input.threadId,
@@ -717,6 +724,38 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
         });
       });
 
+    const discover: DroidAdapterShape["diagnostics"]["discover"] = Effect.fn(
+      "discoverDroidSession",
+    )(function* (threadId) {
+      const context = yield* requireSession(threadId);
+      const [mcpServers, mcpTools, nativeTools, skills] = yield* Effect.tryPromise({
+        try: () =>
+          Promise.all([
+            context.droid.listMcpServers(),
+            context.droid.listMcpTools(),
+            context.droid.listTools(),
+            context.droid.listSkills(),
+          ]),
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: DROID_PROVIDER,
+            method: "diagnostics/discover",
+            detail: droidErrorMessage(cause, "Failed to discover Droid capabilities."),
+            cause,
+          }),
+      });
+
+      return {
+        sessionId: context.droid.id,
+        capturedAt: nowIso(),
+        mcpServers: mcpServers.servers,
+        mcpSummary: mcpServers.summary,
+        mcpTools,
+        nativeTools,
+        skills: skills.skills.map(({ content: _content, ...skill }) => skill),
+      };
+    });
+
     const compactThread = Effect.fn("compactDroidThread")(function* (
       threadId: ThreadId,
       requestedModelSelection?: ProviderSendTurnInput["modelSelection"],
@@ -911,6 +950,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               "Droid rollback requires provider-native rewind/fork support and is not yet wired into T3 Code.",
           });
         }),
+      diagnostics: { discover },
       stopAll: () =>
         Effect.forEach([...sessions.keys()], stopSession, {
           concurrency: "unbounded",

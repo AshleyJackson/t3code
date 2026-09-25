@@ -132,6 +132,7 @@ function createProviderServiceHarness() {
     stopSession: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+    getDroidSessionDiagnostics: () => unsupported(),
     assertConversationRollbackSupported: () => unsupported(),
     getInstanceInfo: (instanceId) => {
       const driverKind = ProviderDriverKind.make(String(instanceId));

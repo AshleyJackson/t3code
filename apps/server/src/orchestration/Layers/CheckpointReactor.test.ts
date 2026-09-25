@@ -126,6 +126,7 @@ function createProviderServiceHarness(
     stopSession: () => unsupported(),
     listSessions,
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+    getDroidSessionDiagnostics: () => unsupported(),
     assertConversationRollbackSupported,
     getInstanceInfo: (instanceId) =>
       Effect.succeed({

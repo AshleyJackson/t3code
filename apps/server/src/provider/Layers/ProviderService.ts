@@ -86,6 +86,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { DROID_PROVIDER, type DroidAdapterShape } from "../droid/DroidAdapterTypes.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -2206,6 +2207,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const getDroidSessionDiagnostics: ProviderServiceMethod<"getDroidSessionDiagnostics"> = Effect.fn(
+    "getDroidSessionDiagnostics",
+  )(function* (threadId) {
+    const routed = yield* resolveRoutableSession({
+      threadId,
+      operation: "ProviderService.getDroidSessionDiagnostics",
+      allowRecovery: false,
+    });
+    if (routed.adapter.provider !== DROID_PROVIDER) {
+      return yield* toValidationError(
+        "ProviderService.getDroidSessionDiagnostics",
+        `Provider '${routed.adapter.provider}' does not expose Droid diagnostics.`,
+      );
+    }
+    const droidAdapter = routed.adapter as DroidAdapterShape;
+    return yield* droidAdapter.diagnostics.discover(routed.threadId);
+  });
+
   const assertConversationRollbackSupported: ProviderServiceMethod<"assertConversationRollbackSupported"> =
     Effect.fn("assertConversationRollbackSupported")(function* (threadId) {
       const routed = yield* resolveRoutableSession({
@@ -2428,6 +2447,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listSessions,
     getCapabilities,
     getInstanceInfo,
+    getDroidSessionDiagnostics,
     assertConversationRollbackSupported,
     rollbackConversation,
     uploadFeedback,
