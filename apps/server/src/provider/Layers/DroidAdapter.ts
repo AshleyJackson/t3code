@@ -44,6 +44,7 @@ import {
   handleDroidNotification,
   handleDroidMessage,
   makeDroidEventBase,
+  meaningfulDroidCompactionTokenCounts,
   nowIso,
   refreshDroidContextStats,
   updateDroidContextSession,
@@ -425,6 +426,9 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           activeToolOutputs: new Map(),
           activeToolInputFingerprints: new Map(),
           activePlanFingerprint: undefined,
+          activePlanToolUseSequences: new Map(),
+          nextPlanToolUseSequence: 0,
+          activePlanSequence: -1,
           activeTurnError: undefined,
           activeTurnState: undefined,
           activeTokenUsage: undefined,
@@ -853,8 +857,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           type: "thread.state.changed",
           payload: {
             state: "compacted",
-            ...(beforeTokens !== undefined ? { beforeTokens } : {}),
-            ...(stats ? { afterTokens: Math.max(0, Math.round(stats.used)) } : {}),
+            ...meaningfulDroidCompactionTokenCounts(beforeTokens, stats?.used),
             detail: {
               source: "droid.sdk",
               removedCount: outcome.removedCount,
