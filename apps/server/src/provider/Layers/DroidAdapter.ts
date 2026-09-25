@@ -78,6 +78,7 @@ import {
   readMcpProviderSession,
   withAgentDeviceEnvironment,
 } from "../../mcp/McpProviderSession.ts";
+import { resolveDroidExecutablePath } from "../Drivers/DroidExecutable.ts";
 
 export type { DroidAdapterOptions } from "../droid/DroidAdapterTypes.ts";
 
@@ -393,12 +394,17 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             (entry): entry is [string, string] => typeof entry[1] === "string",
           ),
         );
+        const executablePath = resolveDroidExecutablePath(
+          settings.binaryPath,
+          sessionEnvironment,
+          hostPlatform,
+        );
         const parentSpan = yield* Effect.currentSpan.pipe(Effect.option);
         const observability =
           options?.observability ??
           makeDroidObservability(runtimeContext, Option.getOrUndefined(parentSpan));
         const commonOptions = {
-          execPath: settings.binaryPath,
+          execPath: executablePath,
           env: sessionEnvironment,
           ...(apiKey ? { apiKey } : {}),
           ...(mcpProviderSession
@@ -429,6 +435,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           modelId,
           reasoningEffort,
           runtimeMode: input.runtimeMode,
+          executablePath,
           hasApiKey: apiKey !== undefined,
         });
         const droid = yield* Effect.tryPromise({
