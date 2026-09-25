@@ -149,6 +149,7 @@ const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 const DROID_DRIVER_KIND = ProviderDriverKind.make("droid");
+const LMSTUDIO_DRIVER_KIND = ProviderDriverKind.make("lmstudio");
 
 export const DEFAULT_MODEL = "gpt-6-astra";
 
@@ -187,6 +188,7 @@ export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
   [CURSOR_DRIVER_KIND]: "composer-2",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
+  [LMSTUDIO_DRIVER_KIND]: "local-model",
 };
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
@@ -225,4 +227,5 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [GROK_DRIVER_KIND]: "Grok",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
   [DROID_DRIVER_KIND]: "Droid",
+  [LMSTUDIO_DRIVER_KIND]: "LM Studio",
 };
