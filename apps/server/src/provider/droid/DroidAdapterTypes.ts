@@ -39,6 +39,7 @@ export interface PendingDroidUserInput {
 export interface DroidContext {
   session: ProviderSession;
   droid: DroidSession;
+  retired: boolean;
   notificationCleanup: (() => void) | undefined;
   readonly pendingPermissions: Map<ApprovalRequestId, PendingDroidPermission>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingDroidUserInput>;

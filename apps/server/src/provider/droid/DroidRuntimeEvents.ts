@@ -241,11 +241,12 @@ export async function refreshDroidContextStats(
   context: DroidContext,
   expectedDroid: DroidContext["droid"] = context.droid,
 ): Promise<ContextStats | undefined> {
+  if (context.retired) return undefined;
   const getContextStats = expectedDroid.getContextStats;
   if (typeof getContextStats !== "function") return undefined;
   try {
     const stats = await getContextStats.call(expectedDroid);
-    if (context.droid !== expectedDroid) return undefined;
+    if (context.retired || context.droid !== expectedDroid) return undefined;
     context.activeTokenUsage = withDroidContextStats(context.activeTokenUsage, stats);
     context.cumulativeTokenUsage = withDroidContextStats(context.cumulativeTokenUsage, stats);
     return stats;
@@ -287,7 +288,7 @@ export async function handleDroidNotification(input: {
   readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
 }) {
   const { context, sourceDroid, notification, eventBase, emitNow } = input;
-  if (context.droid !== sourceDroid) return;
+  if (context.retired || context.droid !== sourceDroid) return;
   const turnId = input.turnId;
   const belongsToCurrentTurn =
     turnId !== undefined
@@ -326,8 +327,9 @@ export async function handleDroidNotification(input: {
       let stats: ContextStats | undefined;
       if (belongsToCurrentTurn) {
         stats = await refreshDroidContextStats(context, sourceDroid);
-        if (context.droid !== sourceDroid) return;
+        if (context.retired || context.droid !== sourceDroid) return;
       }
+      if (context.retired || context.droid !== sourceDroid) return;
       const appliedUsage = stats ? withDroidContextStats(snapshot, stats) : snapshot;
       context.cumulativeTokenUsage = appliedUsage;
       if (belongsToCurrentTurn) {
@@ -353,7 +355,7 @@ export async function handleDroidNotification(input: {
       const sourceDroid = context.droid;
       const usage = droidNotificationTokenUsage(notification, "tokenUsage");
       const cumulativeUsage = droidNotificationTokenUsage(notification, "cumulativeTokenUsage");
-      if (context.droid !== sourceDroid) return;
+      if (context.retired || context.droid !== sourceDroid) return;
       if (usage) {
         const snapshot = notificationTokenUsageSnapshot(
           usage,
@@ -558,6 +560,7 @@ async function ensureDroidToolStarted(input: {
   readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
 }) {
   const { context, toolUseId, toolName, data, source, base, emitNow } = input;
+  if (context.retired) return false;
   const alreadyStarted = context.activeStartedToolIds.has(toolUseId);
   debugDroid("tool.lifecycle.ensure_start", {
     toolUseId,
@@ -580,6 +583,7 @@ async function ensureDroidToolStarted(input: {
       ...(data !== undefined ? { data } : {}),
     },
   });
+  if (context.retired) return false;
   context.activeStartedToolIds.add(toolUseId);
   if (data !== undefined) {
     context.activeToolInputs.set(toolUseId, data);
@@ -617,9 +621,36 @@ async function emitDroidPlan(input: {
 }
 
 function rememberDroidPlanToolUse(context: DroidContext, toolUseId: string) {
+  if (context.retired) return;
   if (context.activePlanToolUseSequences.has(toolUseId)) return;
   context.activePlanToolUseSequences.set(toolUseId, context.nextPlanToolUseSequence);
   context.nextPlanToolUseSequence += 1;
+}
+
+export function clearDroidPlanTracking(context: DroidContext): void {
+  context.activePlanToolUseSequences.clear();
+  context.nextPlanToolUseSequence = 0;
+  context.activePlanSequence = -1;
+  context.activePlanFingerprint = undefined;
+}
+
+function rememberDroidTurnMessages(
+  context: DroidContext,
+  turnId: TurnId,
+  message: DroidStreamEvent,
+): void {
+  const turn = context.turns.find((candidate) => candidate.id === turnId);
+  if (!turn) return;
+
+  if (message.type === "result") {
+    // The result carries the SDK's canonical message list. Prefer it once it
+    // is available, but retain live events for SDK versions that omit it.
+    if (message.messages.length > 0) {
+      turn.items.splice(0, turn.items.length, ...message.messages);
+    }
+    return;
+  }
+  turn.items.push(message);
 }
 
 export async function handleDroidMessage(input: {
@@ -630,7 +661,7 @@ export async function handleDroidMessage(input: {
   readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
 }) {
   const { context, turnId, message, eventBase, emitNow } = input;
-  if (context.session.activeTurnId !== turnId) {
+  if (context.retired || context.session.activeTurnId !== turnId) {
     debugDroid("turn.message.stale", {
       activeTurnId: context.session.activeTurnId,
       messageType: message.type,
@@ -638,6 +669,7 @@ export async function handleDroidMessage(input: {
     });
     return;
   }
+  rememberDroidTurnMessages(context, turnId, message);
   const base = (itemId?: string) =>
     eventBase(context, { turnId, raw: message, ...(itemId ? { itemId } : {}) });
 
@@ -778,6 +810,7 @@ export async function handleDroidMessage(input: {
         base,
         emitNow,
       });
+      if (context.retired) return;
       if (isDroidPlanTool(message.name)) {
         rememberDroidPlanToolUse(context, message.toolUseId);
       }
@@ -794,6 +827,7 @@ export async function handleDroidMessage(input: {
         base,
         emitNow,
       });
+      if (context.retired) return;
       if (isDroidPlanTool(message.toolUse.name)) {
         rememberDroidPlanToolUse(context, toolUseId);
       }
@@ -825,6 +859,7 @@ export async function handleDroidMessage(input: {
         base,
         emitNow,
       });
+      if (context.retired) return;
       const progressText = droidProgressText(message.update, message.content);
       if (progressText && context.activeToolOutputs.get(message.toolUseId) === progressText) {
         return;
@@ -847,6 +882,7 @@ export async function handleDroidMessage(input: {
               delta,
             },
           });
+          if (context.retired) return;
         }
       }
       const summary =
@@ -870,6 +906,7 @@ export async function handleDroidMessage(input: {
             ...(progressText ? { summary: progressSummary.title ?? progressText } : {}),
           },
         });
+        if (context.retired) return;
       }
       return emitNow({
         ...base(message.toolUseId),
@@ -904,6 +941,7 @@ export async function handleDroidMessage(input: {
         base,
         emitNow,
       });
+      if (context.retired) return;
       const resultSummary = message.isError
         ? {}
         : summarizeDroidToolResult(message.toolName, message.content);
@@ -916,19 +954,25 @@ export async function handleDroidMessage(input: {
           ? message.content
           : JSON.stringify(message.content)
         : (resultSummary.detail ?? inputDetail);
-      if (!message.isError && isDroidPlanTool(message.toolName)) {
-        const plan = extractDroidPlan(context.activeToolInputs.get(message.toolUseId));
-        const sequence = context.activePlanToolUseSequences.get(message.toolUseId);
-        if (plan !== undefined && sequence !== undefined) {
-          await emitDroidPlan({
-            context,
-            turnId,
-            toolUseId: message.toolUseId,
-            sequence,
-            plan,
-            base,
-            emitNow,
-          });
+      if (isDroidPlanTool(message.toolName)) {
+        try {
+          if (!message.isError) {
+            const plan = extractDroidPlan(context.activeToolInputs.get(message.toolUseId));
+            const sequence = context.activePlanToolUseSequences.get(message.toolUseId);
+            if (plan !== undefined && sequence !== undefined) {
+              await emitDroidPlan({
+                context,
+                turnId,
+                toolUseId: message.toolUseId,
+                sequence,
+                plan,
+                base,
+                emitNow,
+              });
+            }
+          }
+        } finally {
+          context.activePlanToolUseSequences.delete(message.toolUseId);
         }
       }
       return emitNow({
@@ -1009,7 +1053,7 @@ export async function handleDroidMessage(input: {
       const sourceDroid = context.droid;
       const snapshot = usageSnapshot(message, context);
       const stats = await refreshDroidContextStats(context, sourceDroid);
-      if (context.droid !== sourceDroid) return;
+      if (context.retired || context.droid !== sourceDroid) return;
       const usage = stats ? withDroidContextStats(snapshot, stats) : snapshot;
       context.activeTokenUsage = usage;
       context.cumulativeTokenUsage = usage;
@@ -1032,11 +1076,12 @@ export async function handleDroidMessage(input: {
         const sourceDroid = context.droid;
         const snapshot = usageSnapshot(message.tokenUsage, context);
         const stats = await refreshDroidContextStats(context, sourceDroid);
-        if (context.droid === sourceDroid) {
+        if (!context.retired && context.droid === sourceDroid) {
           const usage = stats ? withDroidContextStats(snapshot, stats) : snapshot;
           context.activeTokenUsage = usage;
           context.cumulativeTokenUsage = usage;
         }
+        if (context.retired || context.session.activeTurnId !== turnId) return;
       }
       context.activeTurnState = message.interrupted
         ? "interrupted"
@@ -1046,6 +1091,7 @@ export async function handleDroidMessage(input: {
       if (!message.success) {
         context.activeTurnError = message.error?.message ?? "Droid reported an unsuccessful turn.";
       }
+      clearDroidPlanTracking(context);
       return;
     }
     case "session_title_updated":

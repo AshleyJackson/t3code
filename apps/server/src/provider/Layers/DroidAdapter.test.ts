@@ -79,6 +79,9 @@ function fakeSession(
       readonly session: DroidSession;
       readonly removedCount: number;
     }>;
+    readonly cwd?: string;
+    readonly supportsWorkingDirectoryChange?: boolean;
+    readonly onChangeWorkingDirectory?: (workingDirectory: string) => Promise<void> | void;
     readonly onListMcpServers?: () => Promise<Awaited<ReturnType<DroidSession["listMcpServers"]>>>;
     readonly onListMcpTools?: () => Promise<Awaited<ReturnType<DroidSession["listMcpTools"]>>>;
     readonly onListTools?: () => Promise<Awaited<ReturnType<DroidSession["listTools"]>>>;
@@ -87,8 +90,12 @@ function fakeSession(
   },
 ): DroidSession {
   let sessionSettings = { interactionMode: DroidInteractionMode.Auto } as DroidSession["settings"];
+  let sessionCwd = hooks?.cwd ?? process.cwd();
   return {
     id: hooks?.id ?? "droid-test-session",
+    get cwd() {
+      return sessionCwd;
+    },
     get settings() {
       return sessionSettings;
     },
@@ -137,6 +144,19 @@ function fakeSession(
       } as DroidSession["settings"];
       return {} as never;
     },
+    ...(hooks?.supportsWorkingDirectoryChange
+      ? {
+          changeWorkingDirectory: async ({
+            workingDirectory,
+          }: {
+            readonly workingDirectory: string;
+          }) => {
+            sessionCwd = workingDirectory;
+            await hooks.onChangeWorkingDirectory?.(workingDirectory);
+            return { resolvedPath: workingDirectory };
+          },
+        }
+      : {}),
   } as unknown as DroidSession;
 }
 
@@ -807,7 +827,14 @@ it.effect("starts a fresh session when a resumed session rejects settings", () =
       let closeCalls = 0;
       const resumed = fakeSession([]);
       resumed.updateSettings = async () => {
-        throw new Error("stale session settings");
+        const error = new Error("Update session settings request failed") as Error & {
+          metadata: Record<string, unknown>;
+        };
+        error.metadata = {
+          code: -32602,
+          message: "Persisted session settings are incompatible with this Droid version.",
+        };
+        throw error;
       };
       resumed.close = async () => {
         closeCalls += 1;
@@ -836,6 +863,318 @@ it.effect("starts a fresh session when a resumed session rejects settings", () =
       NodeAssert.equal(createCalls, 1);
       NodeAssert.equal(closeCalls, 1);
       NodeAssert.equal(session.resumeCursor, "droid-test-session");
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("does not replace a resumed session for transient settings failures", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-resume-settings-transient");
+      let createCalls = 0;
+      const resumed = fakeSession([]);
+      resumed.updateSettings = async () => {
+        throw new Error("temporary transport failure");
+      };
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => {
+            createCalls += 1;
+            return fakeSession([]);
+          },
+          resumeSession: async () => resumed,
+        },
+      });
+
+      const result = yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("droid"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          resumeCursor: "transient-session",
+        })
+        .pipe(Effect.flip);
+
+      NodeAssert.equal(createCalls, 0);
+      NodeAssert.equal(result._tag, "ProviderAdapterRequestError");
+      NodeAssert.match(result.detail, /temporary transport failure/u);
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("starts a fresh session when the resumed cursor no longer exists", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-resume-not-found");
+      let createCalls = 0;
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => {
+            createCalls += 1;
+            return fakeSession([]);
+          },
+          resumeSession: async () => {
+            const error = new Error("Load session request failed") as Error & {
+              metadata: Record<string, unknown>;
+            };
+            error.metadata = { code: -32004, message: "Session not found" };
+            throw error;
+          },
+        },
+      });
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        resumeCursor: "expired-session",
+      });
+
+      NodeAssert.equal(createCalls, 1);
+      NodeAssert.equal(session.resumeCursor, "droid-test-session");
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("rejects resumed sessions that cannot be synchronized to the requested cwd", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-resume-cwd-mismatch");
+      let createCalls = 0;
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => {
+            createCalls += 1;
+            return fakeSession([]);
+          },
+          resumeSession: async () =>
+            fakeSession([], {
+              cwd: `${process.cwd()}-different`,
+            }),
+        },
+      });
+
+      const result = yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("droid"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          resumeCursor: "cwd-mismatch-session",
+        })
+        .pipe(Effect.flip);
+
+      NodeAssert.equal(createCalls, 0);
+      NodeAssert.equal(result._tag, "ProviderAdapterRequestError");
+      NodeAssert.match(result.detail, /working[- ]directory/u);
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("synchronizes a resumed session when the SDK exposes cwd control", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-resume-cwd-change");
+      let changedTo: string | undefined;
+      const resumed = fakeSession([], {
+        cwd: `${process.cwd()}-different`,
+        supportsWorkingDirectoryChange: true,
+        onChangeWorkingDirectory: (workingDirectory) => {
+          changedTo = workingDirectory;
+        },
+      });
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => fakeSession([]),
+          resumeSession: async () => resumed,
+        },
+      });
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        resumeCursor: "cwd-change-session",
+      });
+
+      NodeAssert.equal(session.resumeCursor, resumed.id);
+      NodeAssert.equal(changedTo, process.cwd());
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("validates Droid model selections against the adapter instance", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const wrongInstance = ProviderInstanceId.make("other-droid");
+      const threadId = ThreadId.make("droid-instance-validation");
+      const adapter = yield* makeDroidAdapter(settings, {
+        instanceId: ProviderInstanceId.make("droid-primary"),
+        sdk: {
+          createSession: async () => fakeSession([]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const selection = createModelSelection(wrongInstance, "grok-4.6", []);
+
+      const startResult = yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("droid"),
+          runtimeMode: "full-access",
+          modelSelection: selection,
+        })
+        .pipe(Effect.flip);
+      NodeAssert.equal(startResult._tag, "ProviderAdapterValidationError");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        runtimeMode: "full-access",
+      });
+      const turnResult = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "should fail validation",
+          attachments: [],
+          modelSelection: selection,
+        })
+        .pipe(Effect.flip);
+      NodeAssert.equal(turnResult._tag, "ProviderAdapterValidationError");
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("ignores completion from a retired Droid turn worker", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-retired-worker");
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let createCalls = 0;
+      const oldSession = fakeSession([], {
+        onStream: async function* (_prompt, options) {
+          markStarted();
+          await new Promise<void>((_resolve, reject) => {
+            if (options?.abortSignal?.aborted) {
+              reject(new DOMException("Aborted", "AbortError"));
+              return;
+            }
+            options?.abortSignal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+          yield* [];
+        },
+      });
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () => {
+            createCalls += 1;
+            return createCalls === 1 ? oldSession : fakeSession([]);
+          },
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const events: ProviderRuntimeEvent[] = [];
+      yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "retire me",
+        attachments: [],
+      });
+      yield* Effect.promise(() => started);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.yieldNow;
+
+      NodeAssert.equal(
+        events.some(
+          (event) =>
+            event.turnId === turn.turnId &&
+            (event.type === "turn.completed" || event.type === "runtime.error"),
+        ),
+        false,
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("keeps live Droid stream messages in thread snapshots", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-live-thread");
+      const assistantMessage = {
+        type: "assistant" as const,
+        message: {
+          id: "assistant-history-1",
+          role: "assistant",
+          content: [{ type: "text" as never, text: "hello from history" }],
+        } as never,
+        text: "hello from history",
+      };
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              assistantMessage,
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [assistantMessage],
+                text: "hello from history",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const completed = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "hello", attachments: [] });
+      yield* Fiber.join(completed).pipe(Effect.timeout("2 seconds"));
+
+      const snapshot = yield* adapter.readThread(threadId);
+      NodeAssert.equal(snapshot.turns.length, 1);
+      NodeAssert.deepEqual(snapshot.turns[0]?.items, [assistantMessage]);
     }),
   ).pipe(Effect.provide(testLayer)),
 );
@@ -1597,6 +1936,7 @@ it.effect("applies only successful, non-empty, newest Droid TodoWrite results", 
       plans.map((event) => event.payload.plan),
       [[{ step: "Newer snapshot", status: "pending" }]],
     );
+    NodeAssert.equal(context.activePlanToolUseSequences.size, 0);
   }),
 );
 
