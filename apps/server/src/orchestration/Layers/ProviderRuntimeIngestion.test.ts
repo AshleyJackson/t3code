@@ -4681,6 +4681,39 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activity?.payload).toMatchObject({ requestId: "message-compact" });
   });
 
+  it("does not render equal compaction token samples as a reduction", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "thread.state.changed",
+      eventId: asEventId("evt-thread-compacted-equal-counts"),
+      provider: ProviderDriverKind.make("droid"),
+      providerInstanceId: ProviderInstanceId.make("droid"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      payload: {
+        state: "compacted",
+        beforeTokens: 2_610_000,
+        afterTokens: 2_610_000,
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "evt-thread-compacted-equal-counts",
+      ),
+    );
+    const activity = thread.activities.find(
+      (candidate: ProviderRuntimeTestActivity) =>
+        candidate.id === "evt-thread-compacted-equal-counts",
+    );
+    expect(activity?.summary).toBe("Context compacted");
+    expect(activity?.payload).not.toHaveProperty("beforeTokens");
+    expect(activity?.payload).not.toHaveProperty("afterTokens");
+  });
+
   it("projects Codex task lifecycle chunks into thread activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

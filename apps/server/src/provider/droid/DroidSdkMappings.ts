@@ -315,15 +315,20 @@ export function extractDroidPlan(input: unknown): ReadonlyArray<DroidPlanStep> |
     record?.items,
   ];
   const entries = arrayCandidates.find(Array.isArray);
-  if (entries) return normalizeDroidPlanEntries(entries);
+  if (entries) {
+    const plan = normalizeDroidPlanEntries(entries);
+    return plan.length > 0 ? plan : undefined;
+  }
 
   const todoEntries = parseDroidTodoValue(
     record?.todos ?? (typeof input === "string" ? input : undefined),
   );
   if (!todoEntries) return undefined;
-  // Preserve an empty recognized snapshot so the server can clear the
-  // previous live plan when Droid removes or cancels every todo.
-  return normalizeDroidPlanEntries(todoEntries);
+  const plan = normalizeDroidPlanEntries(todoEntries);
+  // The Droid SDK keeps the previous list when TodoWrite receives an empty or
+  // invalid snapshot. Match that behavior instead of clearing a live plan
+  // before a valid tool result arrives.
+  return plan.length > 0 ? plan : undefined;
 }
 
 export function droidProgressText(

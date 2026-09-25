@@ -55,6 +55,9 @@ export interface DroidContext {
   activeToolOutputs: Map<string, string>;
   activeToolInputFingerprints: Map<string, string>;
   activePlanFingerprint: string | undefined;
+  readonly activePlanToolUseSequences: Map<string, number>;
+  nextPlanToolUseSequence: number;
+  activePlanSequence: number;
   activeTurnError: string | undefined;
   activeTurnState: "completed" | "interrupted" | "failed" | undefined;
   activeTokenUsage: ThreadTokenUsageSnapshot | undefined;

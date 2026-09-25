@@ -255,6 +255,29 @@ export async function refreshDroidContextStats(
   }
 }
 
+export function meaningfulDroidCompactionTokenCounts(
+  beforeTokens: number | undefined,
+  afterTokens: number | undefined,
+): { readonly beforeTokens: number; readonly afterTokens: number } | undefined {
+  if (
+    beforeTokens === undefined ||
+    afterTokens === undefined ||
+    !Number.isFinite(beforeTokens) ||
+    !Number.isFinite(afterTokens) ||
+    beforeTokens < 0 ||
+    afterTokens < 0
+  ) {
+    return undefined;
+  }
+  const roundedBeforeTokens = Math.round(beforeTokens);
+  const roundedAfterTokens = Math.round(afterTokens);
+  if (roundedAfterTokens >= roundedBeforeTokens) return undefined;
+  return {
+    beforeTokens: roundedBeforeTokens,
+    afterTokens: roundedAfterTokens,
+  };
+}
+
 export async function handleDroidNotification(input: {
   readonly context: DroidContext;
   readonly sourceDroid: DroidContext["droid"];
@@ -372,13 +395,13 @@ export async function handleDroidNotification(input: {
       const beforeTokens = context.cumulativeTokenUsage?.usedTokens;
       const stats = await refreshDroidContextStats(context, sourceDroid);
       if (context.droid !== sourceDroid) return;
+      const tokenCounts = meaningfulDroidCompactionTokenCounts(beforeTokens, stats?.used);
       return emitNow({
         ...eventBase(context, { raw: notification }),
         type: "thread.state.changed",
         payload: {
           state: "compacted",
-          ...(beforeTokens !== undefined ? { beforeTokens } : {}),
-          ...(stats ? { afterTokens: stats.used } : {}),
+          ...tokenCounts,
           detail: {
             source: "droid.sdk",
             summaryId: droidNotificationString(notification, "summaryId"),
@@ -390,13 +413,16 @@ export async function handleDroidNotification(input: {
     }
     case "droid_working_state_changed": {
       const state = droidNotificationString(notification, "newState");
+      if (turnId !== undefined && !belongsToCurrentTurn) return;
       return emitNow({
         ...base(),
         type: "session.state.changed",
         payload: {
           state:
             state === "idle"
-              ? "ready"
+              ? turnId !== undefined || context.session.activeTurnId !== undefined
+                ? "running"
+                : "ready"
               : state === "waiting_for_tool_confirmation"
                 ? "waiting"
                 : "running",
@@ -573,18 +599,27 @@ async function emitDroidPlan(input: {
   readonly context: DroidContext;
   readonly turnId: TurnId;
   readonly toolUseId: string;
+  readonly sequence: number;
   readonly plan: ReadonlyArray<{ step: string; status: "pending" | "inProgress" | "completed" }>;
   readonly base: (itemId?: string) => DroidEvent;
   readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
 }) {
+  if (input.sequence < input.context.activePlanSequence) return;
   const fingerprint = `${input.turnId}:${JSON.stringify(input.plan)}`;
   if (input.context.activePlanFingerprint === fingerprint) return;
+  input.context.activePlanSequence = input.sequence;
   input.context.activePlanFingerprint = fingerprint;
   await input.emitNow({
     ...input.base(input.toolUseId),
     type: "turn.plan.updated",
     payload: { plan: input.plan },
   });
+}
+
+function rememberDroidPlanToolUse(context: DroidContext, toolUseId: string) {
+  if (context.activePlanToolUseSequences.has(toolUseId)) return;
+  context.activePlanToolUseSequences.set(toolUseId, context.nextPlanToolUseSequence);
+  context.nextPlanToolUseSequence += 1;
 }
 
 export async function handleDroidMessage(input: {
@@ -744,17 +779,7 @@ export async function handleDroidMessage(input: {
         emitNow,
       });
       if (isDroidPlanTool(message.name)) {
-        const plan = extractDroidPlan(message.input);
-        if (plan !== undefined) {
-          await emitDroidPlan({
-            context,
-            turnId,
-            toolUseId: message.toolUseId,
-            plan,
-            base,
-            emitNow,
-          });
-        }
+        rememberDroidPlanToolUse(context, message.toolUseId);
       }
       return;
     }
@@ -770,17 +795,7 @@ export async function handleDroidMessage(input: {
         emitNow,
       });
       if (isDroidPlanTool(message.toolUse.name)) {
-        const plan = extractDroidPlan(message.toolUse.input);
-        if (plan !== undefined) {
-          await emitDroidPlan({
-            context,
-            turnId,
-            toolUseId,
-            plan,
-            base,
-            emitNow,
-          });
-        }
+        rememberDroidPlanToolUse(context, toolUseId);
       }
       const inputFingerprint = JSON.stringify(message.toolUse.input);
       if (context.activeToolInputFingerprints.get(toolUseId) === inputFingerprint) {
@@ -901,6 +916,21 @@ export async function handleDroidMessage(input: {
           ? message.content
           : JSON.stringify(message.content)
         : (resultSummary.detail ?? inputDetail);
+      if (!message.isError && isDroidPlanTool(message.toolName)) {
+        const plan = extractDroidPlan(context.activeToolInputs.get(message.toolUseId));
+        const sequence = context.activePlanToolUseSequences.get(message.toolUseId);
+        if (plan !== undefined && sequence !== undefined) {
+          await emitDroidPlan({
+            context,
+            turnId,
+            toolUseId: message.toolUseId,
+            sequence,
+            plan,
+            base,
+            emitNow,
+          });
+        }
+      }
       return emitNow({
         ...base(message.toolUseId),
         type: "item.completed",
@@ -967,7 +997,7 @@ export async function handleDroidMessage(input: {
         payload: {
           state:
             message.state === DroidWorkingState.Idle
-              ? "ready"
+              ? "running"
               : message.state === DroidWorkingState.WaitingForToolConfirmation
                 ? "waiting"
                 : "running",

@@ -41,7 +41,11 @@ import * as Stream from "effect/Stream";
 import { ServerConfig } from "../../config.ts";
 import { clearMcpProviderSession, setMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 import { type DroidContext } from "../droid/DroidAdapterTypes.ts";
-import { handleDroidMessage, makeDroidEventBase } from "../droid/DroidRuntimeEvents.ts";
+import {
+  handleDroidMessage,
+  handleDroidNotification,
+  makeDroidEventBase,
+} from "../droid/DroidRuntimeEvents.ts";
 import { makeDroidAdapter } from "./DroidAdapter.ts";
 
 const settings = Schema.decodeSync(DroidSettings)({
@@ -1098,6 +1102,13 @@ it.effect("maps Droid tool progress output and TodoWrite input to shared events"
                 },
               },
               {
+                type: "tool_result",
+                toolUseId: "todo-1",
+                toolName: "TodoWrite",
+                content: "",
+                isError: false,
+              },
+              {
                 type: "tool_call",
                 toolUseId: "exec-1",
                 name: "Execute",
@@ -1214,6 +1225,13 @@ it.effect("maps the Droid SDK TodoWrite text format into plan steps", () =>
                 },
               },
               {
+                type: "tool_result",
+                toolUseId: "todo-text-1",
+                toolName: "TodoWrite",
+                content: "",
+                isError: false,
+              },
+              {
                 type: "result",
                 subtype: "success",
                 sessionId: "droid-test-session",
@@ -1280,6 +1298,13 @@ it.effect("maps successive Droid TodoWrite snapshots into live plan updates", ()
                 } as never,
               },
               {
+                type: "tool_result",
+                toolUseId: "todo-1",
+                toolName: "TodoWrite",
+                content: "",
+                isError: false,
+              },
+              {
                 type: "tool_call_delta",
                 toolUse: {
                   type: "tool_use" as never,
@@ -1295,6 +1320,13 @@ it.effect("maps successive Droid TodoWrite snapshots into live plan updates", ()
                 } as never,
               },
               {
+                type: "tool_result",
+                toolUseId: "todo-2",
+                toolName: "TodoWrite",
+                content: "",
+                isError: false,
+              },
+              {
                 type: "tool_call_delta",
                 toolUse: {
                   type: "tool_use" as never,
@@ -1304,6 +1336,13 @@ it.effect("maps successive Droid TodoWrite snapshots into live plan updates", ()
                     todos: [{ content: "Cancelled task", status: "canceled" }],
                   },
                 } as never,
+              },
+              {
+                type: "tool_result",
+                toolUseId: "todo-3",
+                toolName: "TodoWrite",
+                content: "",
+                isError: true,
               },
               {
                 type: "result",
@@ -1324,7 +1363,7 @@ it.effect("maps successive Droid TodoWrite snapshots into live plan updates", ()
       });
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.threadId === threadId && event.type === "turn.plan.updated"),
-        Stream.take(3),
+        Stream.take(2),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -1349,7 +1388,6 @@ it.effect("maps successive Droid TodoWrite snapshots into live plan updates", ()
             { step: "Inspect logs", status: "completed" },
             { step: "Implement mapping", status: "inProgress" },
           ],
-          [],
         ],
       );
     }),
@@ -1384,6 +1422,9 @@ it.effect("ignores stale Droid messages and scopes plan deduplication to a turn"
       activeToolOutputs: new Map(),
       activeToolInputFingerprints: new Map(),
       activePlanFingerprint: undefined,
+      activePlanToolUseSequences: new Map(),
+      nextPlanToolUseSequence: 0,
+      activePlanSequence: -1,
     } as unknown as DroidContext;
     const eventBase = makeDroidEventBase(instanceId);
     const message = (toolUseId: string) =>
@@ -1392,6 +1433,14 @@ it.effect("ignores stale Droid messages and scopes plan deduplication to a turn"
         toolUseId,
         name: "TodoWrite",
         input: { todos: "- [ ] Keep this task" },
+      }) as never as DroidStreamEvent;
+    const result = (toolUseId: string) =>
+      ({
+        type: "tool_result",
+        toolUseId,
+        toolName: "TodoWrite",
+        content: "",
+        isError: false,
       }) as never as DroidStreamEvent;
 
     await handleDroidMessage({
@@ -1417,7 +1466,25 @@ it.effect("ignores stale Droid messages and scopes plan deduplication to a turn"
     await handleDroidMessage({
       context,
       turnId: secondTurnId,
+      message: result("active-todo-1"),
+      eventBase,
+      emitNow: async (event) => {
+        events.push(event);
+      },
+    });
+    await handleDroidMessage({
+      context,
+      turnId: secondTurnId,
       message: message("active-todo-2"),
+      eventBase,
+      emitNow: async (event) => {
+        events.push(event);
+      },
+    });
+    await handleDroidMessage({
+      context,
+      turnId: secondTurnId,
+      message: result("active-todo-2"),
       eventBase,
       emitNow: async (event) => {
         events.push(event);
@@ -1433,11 +1500,193 @@ it.effect("ignores stale Droid messages and scopes plan deduplication to a turn"
         events.push(event);
       },
     });
+    await handleDroidMessage({
+      context,
+      turnId: firstTurnId,
+      message: result("new-turn-todo"),
+      eventBase,
+      emitNow: async (event) => {
+        events.push(event);
+      },
+    });
 
     const plans = events.filter((event) => event.type === "turn.plan.updated");
     NodeAssert.equal(plans.length, 2);
     NodeAssert.equal(plans[0]?.turnId, secondTurnId);
     NodeAssert.equal(plans[1]?.turnId, firstTurnId);
+  }),
+);
+
+it.effect("applies only successful, non-empty, newest Droid TodoWrite results", () =>
+  Effect.promise(async () => {
+    const threadId = ThreadId.make("droid-todo-result-guards");
+    const turnId = TurnId.make("droid-todo-result-turn");
+    const instanceId = ProviderInstanceId.make("droid");
+    const events: Array<ProviderRuntimeEvent> = [];
+    const context = {
+      session: {
+        provider: ProviderDriverKind.make("droid"),
+        providerInstanceId: instanceId,
+        status: "running",
+        runtimeMode: "full-access",
+        threadId,
+        model: "default",
+        activeTurnId: turnId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      droid: {} as DroidSession,
+      pendingPermissions: new Map(),
+      pendingUserInputs: new Map(),
+      turns: [],
+      activeStartedToolIds: new Set<string>(),
+      activeToolInputs: new Map(),
+      activeToolOutputs: new Map(),
+      activeToolInputFingerprints: new Map(),
+      activePlanFingerprint: undefined,
+      activePlanToolUseSequences: new Map(),
+      nextPlanToolUseSequence: 0,
+      activePlanSequence: -1,
+    } as unknown as DroidContext;
+    const eventBase = makeDroidEventBase(instanceId);
+    const toolCall = (toolUseId: string, step: string) =>
+      ({
+        type: "tool_call",
+        toolUseId,
+        name: "TodoWrite",
+        input: { todos: [{ content: step, status: "pending" }] },
+      }) as never as DroidStreamEvent;
+    const toolResult = (toolUseId: string, isError: boolean) =>
+      ({
+        type: "tool_result",
+        toolUseId,
+        toolName: "TodoWrite",
+        content: "",
+        isError,
+      }) as never as DroidStreamEvent;
+    const handle = (message: DroidStreamEvent) =>
+      handleDroidMessage({
+        context,
+        turnId,
+        message,
+        eventBase,
+        emitNow: async (event) => {
+          events.push(event);
+        },
+      });
+
+    await handle(toolCall("todo-older", "Older snapshot"));
+    await handle(toolCall("todo-newer", "Newer snapshot"));
+    await handle(toolResult("todo-newer", false));
+    await handle(toolResult("todo-older", false));
+    await handle(toolCall("todo-failed", "Failed snapshot"));
+    await handle(toolResult("todo-failed", true));
+    await handle({
+      type: "tool_call",
+      toolUseId: "todo-empty",
+      name: "TodoWrite",
+      input: { todos: [] },
+    } as never as DroidStreamEvent);
+    await handle(toolResult("todo-empty", false));
+
+    const plans = events.filter(
+      (event): event is Extract<ProviderRuntimeEvent, { type: "turn.plan.updated" }> =>
+        event.type === "turn.plan.updated",
+    );
+    NodeAssert.deepEqual(
+      plans.map((event) => event.payload.plan),
+      [[{ step: "Newer snapshot", status: "pending" }]],
+    );
+  }),
+);
+
+it.effect("keeps Droid idle notifications from settling a live turn", () =>
+  Effect.promise(async () => {
+    const threadId = ThreadId.make("droid-idle-state");
+    const turnId = TurnId.make("droid-idle-turn");
+    const staleTurnId = TurnId.make("droid-stale-turn");
+    const instanceId = ProviderInstanceId.make("droid");
+    const droid = fakeSession([], {
+      getContextStats: async () => ({
+        used: 80,
+        remaining: 20,
+        limit: 100,
+        accuracy: "exact" as const,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    });
+    const context = {
+      session: {
+        provider: ProviderDriverKind.make("droid"),
+        providerInstanceId: instanceId,
+        status: "running",
+        runtimeMode: "full-access",
+        threadId,
+        model: "default",
+        activeTurnId: turnId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      droid,
+      cumulativeTokenUsage: { usedTokens: 80 },
+      activeTokenUsage: undefined,
+      compactionInProgress: false,
+      pendingCompactionNotification: undefined,
+    } as unknown as DroidContext;
+    const events: Array<ProviderRuntimeEvent> = [];
+    const eventBase = makeDroidEventBase(instanceId);
+    const emitNow = async (event: ProviderRuntimeEvent) => {
+      events.push(event);
+    };
+
+    await handleDroidNotification({
+      context,
+      sourceDroid: droid,
+      notification: { type: "droid_working_state_changed", newState: "idle" },
+      turnId: staleTurnId,
+      eventBase,
+      emitNow,
+    });
+    await handleDroidNotification({
+      context,
+      sourceDroid: droid,
+      notification: { type: "droid_working_state_changed", newState: "idle" },
+      turnId,
+      eventBase,
+      emitNow,
+    });
+    context.session = { ...context.session, activeTurnId: undefined };
+    await handleDroidNotification({
+      context,
+      sourceDroid: droid,
+      notification: { type: "droid_working_state_changed", newState: "idle" },
+      turnId: undefined,
+      eventBase,
+      emitNow,
+    });
+    await handleDroidNotification({
+      context,
+      sourceDroid: droid,
+      notification: { type: "session_compacted", removedCount: 1 },
+      turnId: undefined,
+      eventBase,
+      emitNow,
+    });
+
+    const stateEvents = events.filter(
+      (event): event is Extract<ProviderRuntimeEvent, { type: "session.state.changed" }> =>
+        event.type === "session.state.changed",
+    );
+    NodeAssert.deepEqual(
+      stateEvents.map((event) => event.payload.state),
+      ["running", "ready"],
+    );
+    const compaction = events.find(
+      (event): event is Extract<ProviderRuntimeEvent, { type: "thread.state.changed" }> =>
+        event.type === "thread.state.changed",
+    );
+    NodeAssert.equal(compaction?.payload.beforeTokens, undefined);
+    NodeAssert.equal(compaction?.payload.afterTokens, undefined);
   }),
 );
 
