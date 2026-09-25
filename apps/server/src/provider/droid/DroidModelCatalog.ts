@@ -181,7 +181,7 @@ export const makeDroidModelCatalog = (logContext: DroidModelCatalogLogContext = 
           ...droidErrorDetails(fetched.failure),
         });
       } else {
-        debugDroid("model_catalog.docs.empty", logContext);
+        debugDroid("model_catalog.docs.empty", { ...logContext });
       }
       if (fresh === undefined) {
         // A failed or empty refresh must not clobber the last good catalog.

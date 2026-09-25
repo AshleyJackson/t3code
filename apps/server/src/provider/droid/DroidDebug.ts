@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as DateTime from "effect/DateTime";
 
 type DebugRecord = Record<string, unknown>;
 const SENSITIVE_KEY = /api[-_]?key|authorization|cookie|password|secret|token/iu;
@@ -66,6 +67,26 @@ export function droidErrorMessage(error: unknown, fallback = "Droid request fail
     .join(" — ");
 }
 
+/**
+ * Resume recovery is intentionally limited to errors that identify a missing
+ * persisted session or invalid session settings. Transport and auth failures
+ * must remain visible instead of silently creating a new conversation.
+ */
+export function isDroidSessionNotFoundError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const metadata = isRecord(error.metadata) ? error.metadata : undefined;
+  return metadata?.code === -32004 || error.name === "SessionNotFoundError";
+}
+
+export function isDroidRecoverableResumeSettingsError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const metadata = isRecord(error.metadata) ? error.metadata : undefined;
+  // Droid's update-session-settings endpoint reports invalid persisted
+  // settings as JSON-RPC INVALID_PARAMS. The caller only uses this predicate
+  // around that endpoint, so the structured code is sufficient here.
+  return metadata?.code === -32602;
+}
+
 const stringLength = (value: unknown): number | undefined =>
   typeof value === "string" ? value.length : undefined;
 
@@ -87,7 +108,7 @@ const summarizePayload = (payload: unknown): DebugRecord => {
 
 export function debugDroid(label: string, details: DebugRecord = {}): void {
   if (process.env.T3_DEBUG_DROID === "0") return;
-  const line = `[${new Date().toISOString()}] [droid-debug] ${label} ${JSON.stringify(details)}\n`;
+  const line = `[${DateTime.formatIso(DateTime.nowUnsafe())}] [droid-debug] ${label} ${JSON.stringify(details)}\n`;
   try {
     NodeFS.appendFileSync(DROID_DEBUG_LOG_PATH, line, "utf8");
   } catch {
