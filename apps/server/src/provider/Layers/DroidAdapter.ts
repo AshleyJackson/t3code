@@ -208,6 +208,8 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       context.retired = true;
       context.activeAbort?.abort();
       context.activeAbort = undefined;
+      context.activeTurnCompletion?.resolve();
+      context.activeTurnCompletion = undefined;
       context.session = {
         ...context.session,
         status: "closed",
@@ -558,6 +560,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           activeTokenUsage: undefined,
           activeTokenUsageBaseline: undefined,
           cumulativeTokenUsage: undefined,
+          activeTurnCompletion: undefined,
           notificationCleanup: undefined,
           activeHookIds: new Set(),
           completedHookIds: new Set(),
@@ -611,7 +614,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           issue: `Droid model selection is bound to instance '${input.modelSelection.instanceId}', expected '${instanceId}'.`,
         });
       }
-      const context = sessions.get(input.threadId);
+      let context = sessions.get(input.threadId);
       if (!context) {
         return yield* new ProviderAdapterValidationError({
           provider: DROID_PROVIDER,
@@ -619,12 +622,31 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           issue: `Unknown Droid thread: ${input.threadId}`,
         });
       }
-      if (context.session.status === "running" || context.session.activeTurnId) {
-        return yield* new ProviderAdapterValidationError({
-          provider: DROID_PROVIDER,
-          operation: "sendTurn",
-          issue: `Droid thread ${input.threadId} already has an active turn.`,
-        });
+
+      // Droid's SDK rejects a second stream while the first one is active.
+      // Keep the durable user message queued at the orchestration boundary,
+      // then admit it only after the active stream has settled. The
+      // orchestration reactor serializes same-thread calls; re-read the
+      // current context after completion because a session may have been
+      // replaced while this request was waiting.
+      while (context.session.status === "running" || context.session.activeTurnId) {
+        const activeTurnCompletion = context.activeTurnCompletion;
+        if (!activeTurnCompletion) {
+          return yield* new ProviderAdapterValidationError({
+            provider: DROID_PROVIDER,
+            operation: "sendTurn",
+            issue: `Droid thread ${input.threadId} has an active turn without a completion signal.`,
+          });
+        }
+        yield* Effect.promise(() => activeTurnCompletion.promise);
+        context = sessions.get(input.threadId);
+        if (!context) {
+          return yield* new ProviderAdapterValidationError({
+            provider: DROID_PROVIDER,
+            operation: "sendTurn",
+            issue: `Unknown Droid thread: ${input.threadId}`,
+          });
+        }
       }
 
       const text = input.input?.trim();
@@ -642,6 +664,14 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
 
       const turnId = TurnId.make(`droid-turn-${NodeCrypto.randomUUID()}`);
       const abort = new AbortController();
+      let resolveTurnCompletion!: () => void;
+      const turnCompletion = new Promise<void>((resolve) => {
+        resolveTurnCompletion = resolve;
+      });
+      context.activeTurnCompletion = {
+        promise: turnCompletion,
+        resolve: resolveTurnCompletion,
+      };
       context.activeAbort = abort;
       context.activeAssistantItems = new Map();
       context.activeThinkingItems = new Map();
@@ -761,6 +791,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               type: "turn.completed",
               payload: { state: "interrupted" },
             });
+            if (context.activeTurnCompletion?.resolve === resolveTurnCompletion) {
+              context.activeTurnCompletion = undefined;
+              resolveTurnCompletion();
+            }
             return;
           }
           if (context.activeTurnError || context.activeTurnState === "failed") {
@@ -778,6 +812,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               type: "turn.completed",
               payload: { state: "failed", errorMessage: message },
             });
+            if (context.activeTurnCompletion?.resolve === resolveTurnCompletion) {
+              context.activeTurnCompletion = undefined;
+              resolveTurnCompletion();
+            }
             return;
           }
 
@@ -829,6 +867,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               ...(context.activeTokenUsage ? { usage: context.activeTokenUsage } : {}),
             },
           });
+          if (context.activeTurnCompletion?.resolve === resolveTurnCompletion) {
+            context.activeTurnCompletion = undefined;
+            resolveTurnCompletion();
+          }
         } catch (cause) {
           debugDroid("turn.worker.failed", {
             threadId: input.threadId,
@@ -846,6 +888,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               type: "turn.completed",
               payload: { state: "interrupted" },
             });
+            if (context.activeTurnCompletion?.resolve === resolveTurnCompletion) {
+              context.activeTurnCompletion = undefined;
+              resolveTurnCompletion();
+            }
             return;
           }
           const message = droidErrorMessage(cause, "Droid turn failed.");
@@ -866,6 +912,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             type: "turn.completed",
             payload: { state: "failed", errorMessage: message },
           });
+          if (context.activeTurnCompletion?.resolve === resolveTurnCompletion) {
+            context.activeTurnCompletion = undefined;
+            resolveTurnCompletion();
+          }
         }
       }).pipe(Effect.forkDetach);
 

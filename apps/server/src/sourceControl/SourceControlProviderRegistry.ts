@@ -3,13 +3,16 @@ import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import {
   SourceControlProviderError,
   type SourceControlProviderDiscoveryItem,
 } from "@t3tools/contracts";
 import type { SourceControlProviderKind } from "@t3tools/contracts";
 import { detectSourceControlProviderFromRemoteUrl } from "@t3tools/shared/sourceControl";
+import { CommandAvailability, type CommandAvailabilityOptions } from "@t3tools/shared/shell";
 
 import * as AzureDevOpsSourceControlProvider from "./AzureDevOpsSourceControlProvider.ts";
 import * as BitbucketSourceControlProvider from "./BitbucketSourceControlProvider.ts";
@@ -202,6 +205,17 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
   function* (registrations: ReadonlyArray<SourceControlProviderRegistration>) {
     const config = yield* ServerConfig;
     const process = yield* VcsProcess.VcsProcess;
+    const commandAvailable = yield* CommandAvailability;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const boundCommandAvailable = (
+      command: string,
+      options?: CommandAvailabilityOptions,
+    ): Effect.Effect<boolean> =>
+      commandAvailable(command, options).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
     const vcsRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
     const providers = new Map<
       SourceControlProviderKind,
@@ -296,6 +310,7 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
             spec,
             process,
             cwd: config.cwd,
+            commandAvailable: boundCommandAvailable,
           }),
         { concurrency: "unbounded" },
       ),

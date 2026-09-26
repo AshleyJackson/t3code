@@ -1123,6 +1123,79 @@ it.effect("ignores completion from a retired Droid turn worker", () =>
   ).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("waits for an active turn before admitting a queued follow-up", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-queued-follow-up");
+      const prompts: Array<string> = [];
+      let markFirstStarted!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        markFirstStarted = resolve;
+      });
+      let releaseFirst!: () => void;
+      const firstReleased = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let markSecondStarted!: () => void;
+      const secondStarted = new Promise<void>((resolve) => {
+        markSecondStarted = resolve;
+      });
+      const result = (text: string) =>
+        ({
+          type: "result",
+          subtype: "success",
+          sessionId: "droid-test-session",
+          durationMs: 1,
+          tokenUsage: null,
+          messages: [],
+          text,
+          turnCount: 1,
+          success: true,
+          interrupted: false,
+          error: null,
+        }) as never;
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([], {
+              onStream: async function* (prompt) {
+                prompts.push(prompt);
+                if (prompt === "first") {
+                  markFirstStarted();
+                  await firstReleased;
+                } else if (prompt === "second") {
+                  markSecondStarted();
+                }
+                yield result(prompt);
+              },
+            }),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "first", attachments: [] });
+      yield* Effect.promise(() => firstStarted);
+
+      const queued = yield* adapter
+        .sendTurn({ threadId, input: "second", attachments: [] })
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      NodeAssert.deepEqual(prompts, ["first"]);
+
+      releaseFirst();
+      const second = yield* Fiber.join(queued).pipe(Effect.timeout("2 seconds"));
+      NodeAssert.equal(second.turnId !== undefined, true);
+      yield* Effect.promise(() => secondStarted);
+      NodeAssert.deepEqual(prompts, ["first", "second"]);
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("keeps live Droid stream messages in thread snapshots", () =>
   Effect.scoped(
     Effect.gen(function* () {

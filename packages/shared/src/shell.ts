@@ -549,7 +549,7 @@ const isExecutableFile = Effect.fnUntraced(function* (
   return canExecuteFile(filePath);
 });
 
-const resolveCommandPathForPlatform = Effect.fn("shell.resolveCommandPathForPlatform")(function* (
+const resolveCommandPathForPlatform = Effect.fnUntraced(function* (
   command: string,
   options: CommandAvailabilityOptions & { readonly platform: NodeJS.Platform },
 ): Effect.fn.Return<string, CommandResolutionError, FileSystem.FileSystem | Path.Path> {
@@ -656,11 +656,14 @@ export const resolveSpawnCommand = Effect.fn("shell.resolveSpawnCommand")(functi
   };
 });
 
-export const isCommandAvailable = Effect.fn("shell.isCommandAvailable")(function* (
+export const isCommandAvailable = Effect.fnUntraced(function* (
   command: string,
   options: CommandAvailabilityOptions = {},
 ) {
-  return yield* resolveCommandPath(command, options).pipe(
+  return yield* resolveCommandPathForPlatform(command, {
+    env: options.env ?? (yield* HostProcessEnvironment),
+    platform: yield* HostProcessPlatform,
+  }).pipe(
     Effect.as(true),
     Effect.catchTag("CommandResolutionError", () => Effect.succeed(false)),
   );

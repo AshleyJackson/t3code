@@ -64,6 +64,12 @@ export interface DroidContext {
   activeTokenUsage: ThreadTokenUsageSnapshot | undefined;
   activeTokenUsageBaseline: ThreadTokenUsageSnapshot | undefined;
   cumulativeTokenUsage: ThreadTokenUsageSnapshot | undefined;
+  activeTurnCompletion:
+    | {
+        readonly promise: Promise<void>;
+        readonly resolve: () => void;
+      }
+    | undefined;
   activeHookIds: Set<string>;
   completedHookIds: Set<string>;
   compactionInProgress: boolean;

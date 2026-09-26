@@ -5,8 +5,11 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import { CommandAvailability, type CommandAvailabilityOptions } from "@t3tools/shared/shell";
 
 import { ServerConfig } from "../config.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -68,6 +71,17 @@ export class SourceControlDiscovery extends Context.Service<
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const process = yield* VcsProcess.VcsProcess;
+  const commandAvailable = yield* CommandAvailability;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const boundCommandAvailable = (
+    command: string,
+    options?: CommandAvailabilityOptions,
+  ): Effect.Effect<boolean> =>
+    commandAvailable(command, options).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
   const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
 
   const probe = <Kind extends VcsDriverKind>(
@@ -88,45 +102,63 @@ export const make = Effect.gen(function* () {
       } satisfies DiscoveryProbeResult<Kind>);
     }
 
-    return process
-      .run({
-        operation: "source-control.discovery.probe",
-        command: executable,
-        args: versionArgs,
-        cwd: config.cwd,
-        timeoutMs: 5_000,
-        maxOutputBytes: 8_000,
-        appendTruncationMarker: true,
-      })
-      .pipe(
-        Effect.map(
-          (result) =>
+    return boundCommandAvailable(executable).pipe(
+      Effect.flatMap((available) =>
+        available
+          ? process
+              .run({
+                operation: "source-control.discovery.probe",
+                command: executable,
+                args: versionArgs,
+                cwd: config.cwd,
+                timeoutMs: 5_000,
+                maxOutputBytes: 8_000,
+                appendTruncationMarker: true,
+              })
+              .pipe(Effect.asSome)
+          : Effect.succeed(Option.none<VcsProcess.VcsProcessOutput>()),
+      ),
+      Effect.map((result) =>
+        Option.match(result, {
+          onNone: () =>
+            ({
+              kind: input.kind,
+              label: input.label,
+              executable,
+              implemented: input.implemented,
+              status: "missing" as const,
+              version: Option.none<string>(),
+              installHint: input.installHint,
+              detail: Option.none<string>(),
+            }) satisfies DiscoveryProbeResult<Kind>,
+          onSome: (output) =>
             ({
               kind: input.kind,
               label: input.label,
               executable,
               implemented: input.implemented,
               status: "available" as const,
-              version: Option.orElse(firstNonEmptyLine(result.stdout), () =>
-                firstNonEmptyLine(result.stderr),
+              version: Option.orElse(firstNonEmptyLine(output.stdout), () =>
+                firstNonEmptyLine(output.stderr),
               ),
               installHint: input.installHint,
               detail: Option.none<string>(),
             }) satisfies DiscoveryProbeResult<Kind>,
-        ),
-        Effect.catch((cause) =>
-          Effect.succeed({
-            kind: input.kind,
-            label: input.label,
-            executable,
-            implemented: input.implemented,
-            status: "missing" as const,
-            version: Option.none<string>(),
-            installHint: input.installHint,
-            detail: detailFromCause(cause),
-          } satisfies DiscoveryProbeResult<Kind>),
-        ),
-      );
+        }),
+      ),
+      Effect.catch((cause) =>
+        Effect.succeed({
+          kind: input.kind,
+          label: input.label,
+          executable,
+          implemented: input.implemented,
+          status: "missing" as const,
+          version: Option.none<string>(),
+          installHint: input.installHint,
+          detail: detailFromCause(cause),
+        } satisfies DiscoveryProbeResult<Kind>),
+      ),
+    );
   };
 
   return SourceControlDiscovery.of({

@@ -249,6 +249,7 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  const turnSendTails = new Map<string, { readonly token: object; readonly tail: unknown }>();
   const compactingThreadIds = new Set<ThreadId>();
   type QueuedTurnStart = Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>;
   // Turn starts received while a thread compacts, replayed in order once its session is restored.
@@ -1474,6 +1475,7 @@ const make = Effect.gen(function* () {
       turnsAfterCompaction.set(event.payload.threadId, queued);
       return;
     }
+    const previous = turnSendTails.get(event.payload.threadId);
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageText: projectComposerContextForProvider({
@@ -1495,12 +1497,23 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const send = providerService
+    const sendBody = providerService
       .sendTurn(sendTurnRequest.value)
       .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure));
+    const token = {};
+    const previousTail = previous?.tail as Effect.Effect<void, never, never> | undefined;
+    const send =
+      previousTail === undefined ? sendBody : previousTail.pipe(Effect.andThen(sendBody));
+    const clearTail = Effect.sync(() => {
+      if (turnSendTails.get(event.payload.threadId)?.token === token) {
+        turnSendTails.delete(event.payload.threadId);
+      }
+    });
+    const sendWithCleanup = send.pipe(Effect.ensuring(clearTail));
+    turnSendTails.set(event.payload.threadId, { token, tail: sendWithCleanup });
     // The forked send settles `sent` from here on, so drop the entry the post-processing hook uses.
     if (resumed && event.commandId !== null) resumedTurnStarts.delete(event.commandId);
-    yield* send.pipe(
+    yield* sendWithCleanup.pipe(
       Effect.ensuring(resumed ? Deferred.succeed(resumed.sent, undefined) : Effect.void),
       Effect.forkScoped,
     );

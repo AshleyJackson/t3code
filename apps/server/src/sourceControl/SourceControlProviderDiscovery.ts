@@ -7,6 +7,12 @@ import type {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import type { CommandAvailabilityOptions } from "@t3tools/shared/shell";
+
+type BoundCommandAvailability = (
+  command: string,
+  options?: CommandAvailabilityOptions,
+) => Effect.Effect<boolean>;
 
 import type * as SourceControlProvider from "./SourceControlProvider.ts";
 import type * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -181,50 +187,69 @@ function probeCli(input: {
   readonly spec: SourceControlCliDiscoverySpec;
   readonly process: VcsProcess.VcsProcess["Service"];
   readonly cwd: string;
+  readonly commandAvailable: BoundCommandAvailability;
 }): Effect.Effect<DiscoveryProbeResult> {
-  return input.process
-    .run({
-      operation: "source-control.discovery.probe",
-      command: input.spec.executable,
-      args: input.spec.versionArgs,
-      cwd: input.cwd,
-      timeoutMs: probeTimeoutMs(input.spec),
-      maxOutputBytes: 8_000,
-      appendTruncationMarker: true,
-    })
-    .pipe(
-      Effect.map(
-        (result) =>
+  return (input.commandAvailable(input.spec.executable) as Effect.Effect<boolean>).pipe(
+    Effect.flatMap((available) =>
+      available
+        ? input.process
+            .run({
+              operation: "source-control.discovery.probe",
+              command: input.spec.executable,
+              args: input.spec.versionArgs,
+              cwd: input.cwd,
+              timeoutMs: probeTimeoutMs(input.spec),
+              maxOutputBytes: 8_000,
+              appendTruncationMarker: true,
+            })
+            .pipe(Effect.asSome)
+        : Effect.succeed(Option.none<VcsProcess.VcsProcessOutput>()),
+    ),
+    Effect.map((result) =>
+      Option.match(result, {
+        onNone: () =>
+          ({
+            kind: input.spec.kind,
+            label: input.spec.label,
+            executable: input.spec.executable,
+            status: "missing" as const,
+            version: Option.none<string>(),
+            installHint: input.spec.installHint,
+            detail: Option.none<string>(),
+          }) satisfies DiscoveryProbeResult,
+        onSome: (output) =>
           ({
             kind: input.spec.kind,
             label: input.spec.label,
             executable: input.spec.executable,
             status: "available" as const,
-            version: Option.orElse(firstNonEmptyLine(result.stdout), () =>
-              firstNonEmptyLine(result.stderr),
+            version: Option.orElse(firstNonEmptyLine(output.stdout), () =>
+              firstNonEmptyLine(output.stderr),
             ),
             installHint: input.spec.installHint,
             detail: Option.none<string>(),
           }) satisfies DiscoveryProbeResult,
-      ),
-      Effect.catch((cause) =>
-        Effect.succeed({
-          kind: input.spec.kind,
-          label: input.spec.label,
-          executable: input.spec.executable,
-          status: "missing" as const,
-          version: Option.none<string>(),
-          installHint: input.spec.installHint,
-          detail: detailFromCause(cause),
-        } satisfies DiscoveryProbeResult),
-      ),
-    );
+      }),
+    ),
+    Effect.catch((cause) =>
+      Effect.succeed({
+        kind: input.spec.kind,
+        label: input.spec.label,
+        executable: input.spec.executable,
+        status: "missing" as const,
+        version: Option.none<string>(),
+        installHint: input.spec.installHint,
+        detail: detailFromCause(cause),
+      } satisfies DiscoveryProbeResult),
+    ),
+  );
 }
 
 export function probeSourceControlProvider(input: {
   readonly spec: SourceControlProviderDiscoverySpec;
   readonly process: VcsProcess.VcsProcess["Service"];
   readonly cwd: string;
+  readonly commandAvailable: BoundCommandAvailability;
 }): Effect.Effect<SourceControlProviderDiscoveryItem> {
   if (input.spec.type === "managed-cli") return input.spec.probe(input.cwd);
   if (input.spec.type === "api") {
@@ -250,6 +275,7 @@ export function probeSourceControlProvider(input: {
     spec,
     process: input.process,
     cwd: input.cwd,
+    commandAvailable: input.commandAvailable,
   }).pipe(
     Effect.flatMap((item) => {
       if (item.status !== "available") {

@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
+import { CommandAvailability } from "@t3tools/shared/shell";
 
 import * as ServerConfig from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -430,6 +431,7 @@ it.effect("reports implemented tools separately from locally available executabl
       }),
     ),
     Layer.provideMerge(NodeServices.layer),
+    Layer.provide(Layer.succeed(CommandAvailability, () => Effect.succeed(true))),
   );
 
   return Effect.gen(function* () {
@@ -490,6 +492,56 @@ it.effect("reports implemented tools separately from locally available executabl
     const bitbucket = result.sourceControlProviders.find((item) => item.kind === "bitbucket");
     assert.ok(bitbucket);
     assert.strictEqual(bitbucket.executable, undefined);
+  }).pipe(Effect.provide(testLayer));
+});
+
+it.effect("does not spawn missing optional discovery commands", () => {
+  const calls: string[] = [];
+  const processMock = {
+    run: (input: VcsProcess.VcsProcessInput) => {
+      calls.push(input.command);
+      return Effect.succeed(processOutput("git version 2.51.0\n"));
+    },
+  } satisfies Partial<VcsProcess.VcsProcess["Service"]>;
+  const testLayer = SourceControlDiscovery.layer.pipe(
+    Layer.provide(
+      ServerConfig.layerTest(process.cwd(), {
+        prefix: "t3-source-control-missing-probe-",
+      }),
+    ),
+    Layer.provide(Layer.mock(VcsProcess.VcsProcess)(processMock)),
+    Layer.provide(
+      sourceControlProviderRegistryTestLayer({
+        process: processMock,
+        bitbucket: {
+          probeAuth: Effect.succeed({
+            status: "unauthenticated",
+            account: Option.none(),
+            host: Option.some("bitbucket.org"),
+            detail: Option.none(),
+          }),
+        },
+      }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+    Layer.provide(
+      Layer.succeed(CommandAvailability, (command) => Effect.succeed(command === "git")),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const discovery = yield* SourceControlDiscovery.SourceControlDiscovery;
+    const result = yield* discovery.discover;
+
+    assert.strictEqual(
+      result.versionControlSystems.find((item) => item.kind === "git")?.status,
+      "available",
+    );
+    assert.strictEqual(
+      result.versionControlSystems.find((item) => item.kind === "jj")?.status,
+      "missing",
+    );
+    assert.ok(calls.every((command) => command === "git"));
   }).pipe(Effect.provide(testLayer));
 });
 
@@ -579,6 +631,7 @@ Logged in to gitlab.com as gitlab-user
       }),
     ),
     Layer.provideMerge(NodeServices.layer),
+    Layer.provide(Layer.succeed(CommandAvailability, () => Effect.succeed(true))),
   );
 
   return Effect.gen(function* () {
@@ -1435,6 +1488,8 @@ it.effect(
                   );
                 },
               }),
+              Layer.succeed(CommandAvailability, () => Effect.succeed(true)),
+              NodeServices.layer,
             ),
           ),
         );

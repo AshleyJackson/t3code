@@ -1,9 +1,11 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import { SourceControlProviderError } from "@t3tools/contracts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { CommandAvailability, type CommandAvailabilityOptions } from "@t3tools/shared/shell";
 import * as ForgejoCli from "./ForgejoCli.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import {
@@ -56,6 +58,17 @@ export const discovery = {
 export const makeDiscovery = Effect.gen(function* () {
   const cli = yield* ForgejoCli.ForgejoCli;
   const process = yield* VcsProcess.VcsProcess;
+  const commandAvailable = yield* CommandAvailability;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const boundCommandAvailable = (
+    command: string,
+    options?: CommandAvailabilityOptions,
+  ): Effect.Effect<boolean> =>
+    commandAvailable(command, options).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
   const listLogins = cli.listLogins;
   if (!listLogins) return discovery;
   return {
@@ -88,6 +101,7 @@ export const makeDiscovery = Effect.gen(function* () {
       const fj = yield* probeSourceControlProvider({
         cwd,
         process,
+        commandAvailable: boundCommandAvailable,
         spec: {
           ...discovery,
           executable: "fj",
@@ -133,7 +147,12 @@ export const makeDiscovery = Effect.gen(function* () {
         }
         return fj;
       }
-      const tea = yield* probeSourceControlProvider({ cwd, process, spec: discovery });
+      const tea = yield* probeSourceControlProvider({
+        cwd,
+        process,
+        commandAvailable: boundCommandAvailable,
+        spec: discovery,
+      });
       return tea.status === "available" || fj.status === "missing" ? tea : fj;
     }),
     refineUnknownRemote: Effect.fn("ForgejoSourceControlProvider.refineUnknownRemote")(

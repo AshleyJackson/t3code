@@ -183,6 +183,9 @@ describe("ProviderCommandReactor", () => {
     readonly compactThreadEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly sendTurnEffect?: (
+      input: unknown,
+    ) => Effect.Effect<{ readonly threadId: ThreadId; readonly turnId: TurnId }>;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
@@ -266,11 +269,13 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-      }),
+    const sendTurn = vi.fn(
+      (sendInput: unknown) =>
+        input?.sendTurnEffect?.(sendInput) ??
+        Effect.succeed({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        }),
     );
     const compactThread = vi.fn((_: ThreadId) => input?.compactThreadEffect?.() ?? Effect.void);
     const interruptTurn = vi.fn((_: unknown) => input?.interruptTurnEffect?.() ?? Effect.void);
@@ -888,6 +893,63 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("serializes concurrent turn sends for the same thread", async () => {
+    const firstStarted = await Effect.runPromise(Deferred.make<void>());
+    const releaseFirst = await Effect.runPromise(Deferred.make<void>());
+    let sendCount = 0;
+    let startedCount = 0;
+    const harness = await createHarness({
+      sendTurnEffect: () => {
+        sendCount += 1;
+        return sendCount === 1
+          ? Effect.sync(() => {
+              startedCount += 1;
+            }).pipe(
+              Effect.andThen(Deferred.succeed(firstStarted, undefined)),
+              Effect.andThen(Deferred.await(releaseFirst)),
+              Effect.as({ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-1") }),
+            )
+          : Effect.sync(() => {
+              startedCount += 1;
+            }).pipe(
+              Effect.as({
+                threadId: ThreadId.make("thread-1"),
+                turnId: asTurnId("turn-2"),
+              }),
+            );
+      },
+    });
+
+    const startTurn = (commandId: string, messageId: string, text: string) =>
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(commandId),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(messageId),
+          role: "user",
+          text,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    await Effect.runPromise(startTurn("cmd-turn-start-1", "user-message-1", "first"));
+    await Effect.runPromise(Deferred.await(firstStarted));
+    await Effect.runPromise(startTurn("cmd-turn-start-2", "user-message-2", "second"));
+    await waitFor(() => startedCount === 1);
+    expect(startedCount).toBe(1);
+
+    await Effect.runPromise(Deferred.succeed(releaseFirst, undefined));
+    await waitFor(() => startedCount === 2);
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+      input: "second",
+    });
   });
 
   effectIt.effect("projects inline context before sending the provider turn", () =>
