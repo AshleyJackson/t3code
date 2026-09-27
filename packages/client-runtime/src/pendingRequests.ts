@@ -109,6 +109,8 @@ const staleRequestFailureDetails = {
     "unknown pending user-input request",
     "unknown pending user input request",
     "unknown pending codex user input request",
+    "unknown pending droid user-input request",
+    "unknown pending droid user input request",
   ],
 } as const;
 

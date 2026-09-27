@@ -2955,6 +2955,57 @@ describe("ProviderRuntimeIngestion", () => {
     },
   );
 
+  it("dismisses native Droid questions after a resumed session loses callback state", async () => {
+    const harness = await createHarness();
+    const provider = ProviderDriverKind.make("droid");
+    const request = {
+      ...userInputEvent("resumed-turn", "resumed-droid-question"),
+      provider,
+      turnId: undefined,
+    };
+    const asynchronousRequest = {
+      ...userInputEvent("resumed-turn", "async-droid-question", "message"),
+      provider,
+    };
+    await harness.emitAndDrain([request, asynchronousRequest]);
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(true);
+
+    await harness.emitAndDrain([
+      {
+        type: "session.started",
+        eventId: asEventId("droid-session-resumed"),
+        provider,
+        threadId: request.threadId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { message: "Droid SDK session started", resume: true },
+      },
+    ]);
+
+    const thread = (await harness.readModel()).threads[0]!;
+    const resolved = thread.activities.filter(
+      (activity) =>
+        activity.kind === "user-input.resolved" &&
+        typeof activity.payload === "object" &&
+        activity.payload !== null &&
+        (activity.payload as Record<string, unknown>).requestId === request.requestId,
+    );
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]).toMatchObject({
+      turnId: null,
+      payload: { requestId: request.requestId },
+    });
+    expect(
+      thread.activities.some(
+        (activity) =>
+          activity.kind === "user-input.resolved" &&
+          typeof activity.payload === "object" &&
+          activity.payload !== null &&
+          (activity.payload as Record<string, unknown>).requestId === asynchronousRequest.requestId,
+      ),
+    ).toBe(false);
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(true);
+  });
+
   it("keeps a stale request dismissed when its turn later completes", async () => {
     const harness = await createHarness();
     const request = userInputEvent("stale-turn", "stale-question");

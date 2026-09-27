@@ -457,6 +457,43 @@ describe("pending questions", () => {
 
     expect(derivePendingRequests(activities).userInputs).toEqual([]);
   });
+
+  it("clears stale Droid questions when the provider reports an unknown callback", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "droid-user-input-open-stale",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "req-droid-user-input-stale",
+          questions: [
+            {
+              id: "confirm",
+              header: "Confirm",
+              question: "Continue?",
+              options: [],
+            },
+          ],
+        },
+      }),
+      makeActivity({
+        id: "droid-user-input-failed-stale",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "provider.user-input.respond.failed",
+        summary: "Provider user input response failed",
+        tone: "error",
+        payload: {
+          requestId: "req-droid-user-input-stale",
+          detail:
+            "Provider adapter request failed (droid) for respondToUserInput: Unknown pending Droid user-input request: req-droid-user-input-stale",
+        },
+      }),
+    ];
+
+    expect(derivePendingRequests(activities).userInputs).toEqual([]);
+  });
 });
 
 describe.each(["approval", "user-input"])("%s request completion", (requestKind) => {

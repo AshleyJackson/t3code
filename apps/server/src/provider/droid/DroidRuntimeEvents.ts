@@ -11,13 +11,14 @@ import {
   EventId,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   type ProviderInstanceId,
   type ProviderRuntimeEvent,
   type TurnId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { DROID_PROVIDER, type DroidContext } from "./DroidAdapterTypes.ts";
+import { DROID_PROVIDER, type DroidContext, type DroidTaskState } from "./DroidAdapterTypes.ts";
 import { debugDroid, droidErrorDetails } from "./DroidDebug.ts";
 import {
   contentBlockText,
@@ -189,6 +190,191 @@ function droidNotificationRecord(
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function droidTaskStateMap(context: DroidContext): Map<string, DroidTaskState> {
+  context.activeDroidTasks ??= new Map();
+  return context.activeDroidTasks;
+}
+
+function droidTaskText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.replace(/\s+/gu, " ").trim()
+    : undefined;
+}
+
+function droidTaskInput(input: unknown): {
+  readonly description: string | undefined;
+  readonly taskType: string | undefined;
+} {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return { description: undefined, taskType: undefined };
+  }
+  const record = input as Record<string, unknown>;
+  return {
+    description: droidTaskText(record.description) ?? droidTaskText(record.prompt),
+    taskType: droidTaskText(record.subagent_type) ?? droidTaskText(record.subagentType),
+  };
+}
+
+function droidTaskOutput(content: unknown): {
+  readonly taskId: string | undefined;
+  readonly status: "running" | "completed" | "failed" | "stopped" | undefined;
+  readonly description: string | undefined;
+} {
+  if (typeof content !== "string") {
+    return { taskId: undefined, status: undefined, description: undefined };
+  }
+  const taskId = /^task[_ ]id:\s*(\S+)/imu.exec(content)?.[1];
+  const statusText = /^status:\s*(\S+)/imu.exec(content)?.[1]?.toLowerCase();
+  const status =
+    statusText === "running" || statusText === "completed" || statusText === "failed"
+      ? statusText
+      : statusText === "cancelled" || statusText === "canceled" || statusText === "stopped"
+        ? "stopped"
+        : undefined;
+  const description = /^description:\s*(.+)$/imu.exec(content)?.[1]?.trim();
+  return { taskId, status, description };
+}
+
+function droidTaskProgressUpdate(update: unknown): {
+  readonly taskId: string | undefined;
+  readonly status: "running" | "completed" | "failed" | "stopped" | undefined;
+  readonly description: string | undefined;
+  readonly taskType: string | undefined;
+  readonly summary: string | undefined;
+  readonly lastToolName: string | undefined;
+} {
+  if (update === null || typeof update !== "object" || Array.isArray(update)) {
+    return {
+      taskId: undefined,
+      status: undefined,
+      description: undefined,
+      taskType: undefined,
+      summary: undefined,
+      lastToolName: undefined,
+    };
+  }
+  const record = update as Record<string, unknown>;
+  const taskId = droidTaskText(record.subagentSessionId);
+  const taskInput = droidTaskInput(record.parameters);
+  const statusText = droidTaskText(record.status)?.toLowerCase();
+  const status =
+    statusText === "completed" || statusText === "success" || statusText === "succeeded"
+      ? "completed"
+      : statusText === "failed" || statusText === "error"
+        ? "failed"
+        : statusText === "cancelled" || statusText === "canceled" || statusText === "stopped"
+          ? "stopped"
+          : taskId
+            ? "running"
+            : undefined;
+  return {
+    taskId,
+    status,
+    description: taskInput.description ?? droidTaskText(record.details),
+    taskType: taskInput.taskType,
+    summary: droidTaskText(record.text) ?? droidTaskText(record.details),
+    lastToolName: droidTaskText(record.toolName),
+  };
+}
+
+async function emitDroidTaskStarted(input: {
+  readonly context: DroidContext;
+  readonly taskId: string;
+  readonly description: string | undefined;
+  readonly taskType: string | undefined;
+  readonly toolUseId: string | undefined;
+  readonly base: (itemId?: string) => DroidEvent;
+  readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
+}): Promise<DroidTaskState> {
+  const tasks = droidTaskStateMap(input.context);
+  const existing = tasks.get(input.taskId);
+  if (existing) return existing;
+  const task: DroidTaskState = {
+    taskId: input.taskId,
+    description: input.description ?? "Droid subagent",
+    taskType: input.taskType,
+    toolUseId: input.toolUseId,
+    status: "running",
+  };
+  tasks.set(task.taskId, task);
+  await input.emitNow({
+    ...input.base(input.toolUseId),
+    type: "task.started",
+    payload: {
+      taskId: RuntimeTaskId.make(task.taskId),
+      description: task.description,
+      title: task.description,
+      ...(task.taskType ? { taskType: task.taskType, role: task.taskType } : {}),
+      ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
+      timelineBypass: true,
+    },
+  });
+  return task;
+}
+
+async function emitDroidTaskProgress(input: {
+  readonly context: DroidContext;
+  readonly taskId: string;
+  readonly description: string | undefined;
+  readonly taskType: string | undefined;
+  readonly toolUseId: string | undefined;
+  readonly summary: string | undefined;
+  readonly lastToolName: string | undefined;
+  readonly base: (itemId?: string) => DroidEvent;
+  readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
+}) {
+  const existing = droidTaskStateMap(input.context).get(input.taskId);
+  if (existing?.status !== undefined && existing.status !== "running") return;
+  const task = await emitDroidTaskStarted(input);
+  if (task.status !== "running") return;
+  await input.emitNow({
+    ...input.base(input.toolUseId),
+    type: "task.progress",
+    payload: {
+      taskId: RuntimeTaskId.make(task.taskId),
+      description: task.description,
+      ...(input.summary ? { summary: input.summary } : {}),
+      ...(input.lastToolName ? { lastToolName: input.lastToolName } : {}),
+      status: "running",
+      title: task.description,
+      ...(task.taskType ? { taskType: task.taskType, role: task.taskType } : {}),
+      ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
+      timelineBypass: true,
+    },
+  });
+}
+
+async function emitDroidTaskCompleted(input: {
+  readonly context: DroidContext;
+  readonly taskId: string;
+  readonly description: string | undefined;
+  readonly taskType: string | undefined;
+  readonly toolUseId: string | undefined;
+  readonly status: "completed" | "failed" | "stopped";
+  readonly base: (itemId?: string) => DroidEvent;
+  readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
+}) {
+  const tasks = droidTaskStateMap(input.context);
+  const existing = tasks.get(input.taskId);
+  if (existing?.status !== undefined && existing.status !== "running") return existing;
+  const task = await emitDroidTaskStarted(input);
+  tasks.set(task.taskId, { ...task, status: input.status });
+  await input.emitNow({
+    ...input.base(input.toolUseId),
+    type: "task.completed",
+    payload: {
+      taskId: RuntimeTaskId.make(task.taskId),
+      status: input.status,
+      summary:
+        input.status === "completed" ? "Subagent report delivered." : `Subagent ${input.status}.`,
+      title: task.description,
+      ...(task.taskType ? { taskType: task.taskType, role: task.taskType } : {}),
+      ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
+      timelineBypass: true,
+    },
+  });
 }
 
 function droidNotificationTokenUsage(
@@ -387,6 +573,38 @@ export async function handleDroidNotification(input: {
             payload: { usage: context.cumulativeTokenUsage },
           })
         : undefined;
+    }
+    case "child_session_available": {
+      const taskId = droidNotificationString(notification, "childSessionId");
+      if (!taskId) return;
+      const toolUseId = droidNotificationString(notification, "toolUseId");
+      const taskType = droidNotificationString(notification, "subagentType");
+      const description = droidNotificationString(notification, "description");
+      return emitDroidTaskStarted({
+        context,
+        taskId,
+        description,
+        taskType,
+        toolUseId,
+        base,
+        emitNow,
+      });
+    }
+    case "tool_progress_update": {
+      const update = droidNotificationRecord(notification, "update");
+      const taskId = update ? droidNotificationString(update, "subagentSessionId") : undefined;
+      if (!taskId) return;
+      return emitDroidTaskProgress({
+        context,
+        taskId,
+        description: update ? droidNotificationString(update, "details") : undefined,
+        taskType: undefined,
+        toolUseId: droidNotificationString(notification, "toolUseId"),
+        summary: update ? droidNotificationString(update, "text") : undefined,
+        lastToolName: droidNotificationString(notification, "toolName"),
+        base,
+        emitNow,
+      });
     }
     case "session_compacted": {
       if (context.compactionInProgress) {
@@ -860,6 +1078,38 @@ export async function handleDroidMessage(input: {
         emitNow,
       });
       if (context.retired) return;
+      const taskUpdate = droidTaskProgressUpdate(message.update);
+      if (taskUpdate.taskId) {
+        if (
+          taskUpdate.status === "completed" ||
+          taskUpdate.status === "failed" ||
+          taskUpdate.status === "stopped"
+        ) {
+          await emitDroidTaskCompleted({
+            context,
+            taskId: taskUpdate.taskId,
+            description: taskUpdate.description,
+            taskType: taskUpdate.taskType,
+            toolUseId: message.toolUseId,
+            status: taskUpdate.status,
+            base,
+            emitNow,
+          });
+        } else {
+          await emitDroidTaskProgress({
+            context,
+            taskId: taskUpdate.taskId,
+            description: taskUpdate.description,
+            taskType: taskUpdate.taskType,
+            toolUseId: message.toolUseId,
+            summary: taskUpdate.summary,
+            lastToolName: taskUpdate.lastToolName ?? message.toolName,
+            base,
+            emitNow,
+          });
+        }
+        if (context.retired) return;
+      }
       const progressText = droidProgressText(message.update, message.content);
       if (progressText && context.activeToolOutputs.get(message.toolUseId) === progressText) {
         return;
@@ -942,6 +1192,48 @@ export async function handleDroidMessage(input: {
         emitNow,
       });
       if (context.retired) return;
+      if (message.toolName === "Task" || message.toolName === "TaskOutput") {
+        const output = droidTaskOutput(message.content);
+        if (output.taskId) {
+          const inputTask = droidTaskInput(context.activeToolInputs.get(message.toolUseId));
+          const taskType = inputTask.taskType;
+          const description = output.description ?? inputTask.description;
+          if (output.status === "running") {
+            await emitDroidTaskProgress({
+              context,
+              taskId: output.taskId,
+              description,
+              taskType,
+              toolUseId: message.toolUseId,
+              summary: "Subagent is still running.",
+              lastToolName: undefined,
+              base,
+              emitNow,
+            });
+          } else if (output.status) {
+            await emitDroidTaskCompleted({
+              context,
+              taskId: output.taskId,
+              description,
+              taskType,
+              toolUseId: message.toolUseId,
+              status: output.status,
+              base,
+              emitNow,
+            });
+          } else if (message.toolName === "Task") {
+            await emitDroidTaskStarted({
+              context,
+              taskId: output.taskId,
+              description,
+              taskType,
+              toolUseId: message.toolUseId,
+              base,
+              emitNow,
+            });
+          }
+        }
+      }
       const resultSummary = message.isError
         ? {}
         : summarizeDroidToolResult(message.toolName, message.content);

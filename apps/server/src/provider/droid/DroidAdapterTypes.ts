@@ -33,7 +33,16 @@ export interface PendingDroidPermission {
 export interface PendingDroidUserInput {
   readonly questions: ReadonlyArray<UserInputQuestion>;
   readonly droidQuestions: AskUserRequestParams["questions"];
+  readonly turnId: TurnId | undefined;
   readonly resolve: (result: AskUserResult) => void;
+}
+
+export interface DroidTaskState {
+  readonly taskId: string;
+  readonly description: string;
+  readonly taskType: string | undefined;
+  readonly toolUseId: string | undefined;
+  status: "running" | "completed" | "failed" | "stopped";
 }
 
 export interface DroidContext {
@@ -55,6 +64,7 @@ export interface DroidContext {
   activeToolInputs: Map<string, unknown>;
   activeToolOutputs: Map<string, string>;
   activeToolInputFingerprints: Map<string, string>;
+  activeDroidTasks?: Map<string, DroidTaskState>;
   activePlanFingerprint: string | undefined;
   readonly activePlanToolUseSequences: Map<string, number>;
   nextPlanToolUseSequence: number;

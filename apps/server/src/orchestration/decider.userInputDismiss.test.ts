@@ -140,4 +140,31 @@ it.layer(NodeServices.layer)("user input dismiss decider", (it) => {
       });
     }),
   );
+
+  it.effect("rejects responding to a native callback question that was already resolved", () =>
+    Effect.gen(function* () {
+      const requested = makeRequest(undefined);
+      const resolved: OrchestrationThreadActivity = {
+        ...requested,
+        id: EventId.make("resolved-native-question"),
+        kind: "user-input.resolved",
+      };
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("respond-resolved-native-question"),
+          threadId,
+          requestId,
+          answers: { "0": "Continue" },
+          createdAt: NOW,
+        },
+        readModel: makeReadModel([requested, resolved]),
+        userInputActivity: resolved,
+      }).pipe(Effect.flip);
+      expect(result).toMatchObject({
+        _tag: "OrchestrationCommandInvariantError",
+        detail: "This question has already been answered.",
+      });
+    }),
+  );
 });

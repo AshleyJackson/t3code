@@ -14,6 +14,7 @@ import {
   type OrchestrationCheckpointSummary,
   type OrchestrationThreadActivity,
   type ProjectId,
+  ProviderDriverKind,
   type ProviderRequestKind,
   type ProviderRuntimeEvent,
   type ResponseStreamingMode,
@@ -157,6 +158,23 @@ function sameId(left: string | null | undefined, right: string | null | undefine
     return false;
   }
   return left === right;
+}
+
+function findPendingNativeUserInputs(
+  activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload" | "turnId">>,
+): ReadonlyArray<{ readonly requestId: string; readonly turnId: TurnId | null }> {
+  const pending = new Map<string, TurnId | null>();
+  for (const activity of activities) {
+    if (!Predicate.isObject(activity.payload)) continue;
+    const requestId = activity.payload.requestId;
+    if (typeof requestId !== "string" || requestId.length === 0) continue;
+    if (activity.kind === "user-input.requested" && activity.payload.responseMode !== "message") {
+      pending.set(requestId, activity.turnId);
+    } else if (activity.kind === "user-input.resolved") {
+      pending.delete(requestId);
+    }
+  }
+  return Array.from(pending, ([requestId, turnId]) => ({ requestId, turnId }));
 }
 
 function hasCheckpointForTurn(
@@ -1957,6 +1975,30 @@ const make = Effect.gen(function* () {
         }
       }
 
+      if (event.type === "session.started" && event.provider === ProviderDriverKind.make("droid")) {
+        const userInputActivities =
+          yield* projectionThreadActivityRepository.listUserInputLifecycleByThreadId({
+            threadId: thread.id,
+          });
+        for (const { requestId, turnId } of findPendingNativeUserInputs(userInputActivities)) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "orphaned-droid-user-input-resolved"),
+            threadId: thread.id,
+            activity: {
+              id: EventId.make(`${event.eventId}:orphaned-droid-user-input-resolved:${requestId}`),
+              createdAt: now,
+              tone: "info",
+              kind: "user-input.resolved",
+              summary: "User input dismissed",
+              payload: { requestId },
+              turnId,
+            },
+            createdAt: now,
+          });
+        }
+      }
+
       const assistantDelta =
         event.type === "content.delta" && event.payload.streamKind === "assistant_text"
           ? event.payload.delta
@@ -2353,27 +2395,12 @@ const make = Effect.gen(function* () {
             yield* projectionThreadActivityRepository.listUserInputLifecycleByThreadId({
               threadId: thread.id,
             });
-          const pendingRequestIds = new Set<string>();
-          for (const activity of userInputActivities) {
-            const payload =
-              typeof activity.payload === "object" && activity.payload !== null
-                ? (activity.payload as Record<string, unknown>)
-                : null;
-            const requestId = payload?.requestId;
-            if (typeof requestId !== "string") continue;
-            if (
-              activity.kind === "user-input.requested" &&
-              activity.turnId === turnId &&
-              payload?.responseMode !== "message"
-            ) {
-              pendingRequestIds.add(requestId);
-            } else if (activity.kind === "user-input.resolved") {
-              pendingRequestIds.delete(requestId);
-            }
-          }
           // A terminal turn cannot accept native callback answers. Message-mode
           // questions may outlive that turn and still accept a later user message.
-          for (const requestId of pendingRequestIds) {
+          for (const { requestId, turnId: requestTurnId } of findPendingNativeUserInputs(
+            userInputActivities,
+          )) {
+            if (!sameId(requestTurnId, turnId)) continue;
             yield* orchestrationEngine.dispatch({
               type: "thread.activity.append",
               commandId: yield* providerCommandId(event, "terminal-user-input-resolved"),

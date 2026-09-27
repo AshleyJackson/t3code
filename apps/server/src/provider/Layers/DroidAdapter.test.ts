@@ -2013,6 +2013,219 @@ it.effect("applies only successful, non-empty, newest Droid TodoWrite results", 
   }),
 );
 
+it.effect("bridges Droid subagent launch, progress, and completion events", () =>
+  Effect.promise(async () => {
+    const threadId = ThreadId.make("droid-subagent-lifecycle");
+    const turnId = TurnId.make("droid-subagent-turn");
+    const instanceId = ProviderInstanceId.make("droid");
+    const events: Array<ProviderRuntimeEvent> = [];
+    const context = {
+      session: {
+        provider: ProviderDriverKind.make("droid"),
+        providerInstanceId: instanceId,
+        status: "running",
+        runtimeMode: "full-access",
+        threadId,
+        model: "default",
+        activeTurnId: turnId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      droid: {} as DroidSession,
+      pendingPermissions: new Map(),
+      pendingUserInputs: new Map(),
+      turns: [],
+      activeStartedToolIds: new Set<string>(),
+      activeToolInputs: new Map(),
+      activeToolOutputs: new Map(),
+      activeToolInputFingerprints: new Map(),
+      activeDroidTasks: new Map(),
+      activePlanFingerprint: undefined,
+      activePlanToolUseSequences: new Map(),
+      nextPlanToolUseSequence: 0,
+      activePlanSequence: -1,
+    } as unknown as DroidContext;
+    const eventBase = makeDroidEventBase(instanceId);
+    const emitNow = async (event: ProviderRuntimeEvent) => {
+      events.push(event);
+    };
+    const handle = (message: DroidStreamEvent) =>
+      handleDroidMessage({
+        context,
+        turnId,
+        message,
+        eventBase,
+        emitNow,
+      });
+
+    await handle({
+      type: "tool_call",
+      toolUseId: "task-tool-1",
+      name: "Task",
+      input: { description: "Research integrations", subagent_type: "worker" },
+    } as never as DroidStreamEvent);
+    await handle({
+      type: "tool_result",
+      toolUseId: "task-tool-1",
+      toolName: "Task",
+      content:
+        "Task launched in background.\ntask_id: child-1\nsession_id: child-1\nsubagent_type: worker\ndescription: Research integrations",
+      isError: false,
+    } as never as DroidStreamEvent);
+    await handle({
+      type: "tool_result",
+      toolUseId: "task-output-1",
+      toolName: "TaskOutput",
+      content: "Task ID: child-1\nStatus: completed\nDuration: 2.0s",
+      isError: false,
+    } as never as DroidStreamEvent);
+    await handleDroidNotification({
+      context,
+      sourceDroid: context.droid,
+      notification: {
+        type: "child_session_available",
+        childSessionId: "child-2",
+        toolUseId: "task-tool-2",
+        subagentType: "worker",
+        description: "Inspect the runtime",
+      },
+      turnId,
+      eventBase,
+      emitNow,
+    });
+
+    const started = events.filter(
+      (event): event is Extract<ProviderRuntimeEvent, { type: "task.started" }> =>
+        event.type === "task.started",
+    );
+    const completed = events.filter(
+      (event): event is Extract<ProviderRuntimeEvent, { type: "task.completed" }> =>
+        event.type === "task.completed",
+    );
+    NodeAssert.equal(started.length, 2);
+    NodeAssert.equal(started[0]?.payload.taskId, "child-1");
+    NodeAssert.equal(started[0]?.payload.description, "Research integrations");
+    NodeAssert.equal(started[0]?.payload.role, "worker");
+    NodeAssert.equal(started[1]?.payload.taskId, "child-2");
+    NodeAssert.equal(completed.length, 1);
+    NodeAssert.equal(completed[0]?.payload.taskId, "child-1");
+    NodeAssert.equal(completed[0]?.payload.status, "completed");
+  }),
+);
+
+it.effect("bridges Droid TaskOutput tool progress into task lifecycle events", () =>
+  Effect.promise(async () => {
+    const threadId = ThreadId.make("droid-subagent-progress");
+    const turnId = TurnId.make("droid-subagent-progress-turn");
+    const instanceId = ProviderInstanceId.make("droid");
+    const events: Array<ProviderRuntimeEvent> = [];
+    const context = {
+      session: {
+        provider: ProviderDriverKind.make("droid"),
+        providerInstanceId: instanceId,
+        status: "running",
+        runtimeMode: "full-access",
+        threadId,
+        model: "default",
+        activeTurnId: turnId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      droid: {} as DroidSession,
+      pendingPermissions: new Map(),
+      pendingUserInputs: new Map(),
+      turns: [],
+      activeStartedToolIds: new Set<string>(),
+      activeToolInputs: new Map(),
+      activeToolOutputs: new Map(),
+      activeToolInputFingerprints: new Map(),
+      activeDroidTasks: new Map(),
+      activePlanFingerprint: undefined,
+      activePlanToolUseSequences: new Map(),
+      nextPlanToolUseSequence: 0,
+      activePlanSequence: -1,
+    } as unknown as DroidContext;
+    const eventBase = makeDroidEventBase(instanceId);
+    const emitNow = async (event: ProviderRuntimeEvent) => {
+      events.push(event);
+    };
+    const handle = (message: DroidStreamEvent) =>
+      handleDroidMessage({
+        context,
+        turnId,
+        message,
+        eventBase,
+        emitNow,
+      });
+
+    await handle({
+      type: "tool_progress",
+      toolUseId: "task-output-1",
+      toolName: "TaskOutput",
+      content: "working",
+      update: {
+        type: "status",
+        status: "running",
+        text: "working",
+        subagentSessionId: "child-progress-1",
+        parameters: {
+          description: "Inspect the runtime",
+          subagent_type: "explorer",
+        },
+      },
+    } as never as DroidStreamEvent);
+    await handle({
+      type: "tool_progress",
+      toolUseId: "task-output-1",
+      toolName: "TaskOutput",
+      content: "done",
+      update: {
+        type: "tool_result",
+        status: "completed",
+        text: "done",
+        subagentSessionId: "child-progress-1",
+      },
+    } as never as DroidStreamEvent);
+    await handle({
+      type: "tool_progress",
+      toolUseId: "task-output-1",
+      toolName: "TaskOutput",
+      content: "done again",
+      update: {
+        type: "tool_result",
+        status: "completed",
+        text: "done again",
+        subagentSessionId: "child-progress-1",
+      },
+    } as never as DroidStreamEvent);
+
+    const taskEvents = events.filter(
+      (event) =>
+        event.type === "task.started" ||
+        event.type === "task.progress" ||
+        event.type === "task.completed",
+    );
+    NodeAssert.deepEqual(
+      taskEvents.map((event) => event.type),
+      ["task.started", "task.progress", "task.completed"],
+    );
+    const started = taskEvents[0];
+    NodeAssert.equal(
+      started?.type === "task.started" ? started.payload.description : undefined,
+      "Inspect the runtime",
+    );
+    NodeAssert.equal(
+      started?.type === "task.started" ? started.payload.role : undefined,
+      "explorer",
+    );
+    const completed = taskEvents[2];
+    NodeAssert.equal(
+      completed?.type === "task.completed" ? completed.payload.status : undefined,
+      "completed",
+    );
+  }),
+);
+
 it.effect("keeps Droid idle notifications from settling a live turn", () =>
   Effect.promise(async () => {
     const threadId = ThreadId.make("droid-idle-state");
@@ -2372,14 +2585,17 @@ it.effect("routes Droid AskUser requests through canonical user-input events", (
           resumeSession: async () => fakeSession([]),
         },
       });
-      const openedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.type === "user-input.requested"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.type === "turn.completed"),
-        Stream.runHead,
+      const openedDeferred =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "user-input.requested" }>>();
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.tap((event) =>
+          event.type === "user-input.requested"
+            ? Deferred.succeed(openedDeferred, event).pipe(Effect.ignore)
+            : Effect.void,
+        ),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
         Effect.forkChild,
       );
 
@@ -2388,18 +2604,23 @@ it.effect("routes Droid AskUser requests through canonical user-input events", (
         provider: ProviderDriverKind.make("droid"),
         runtimeMode: "auto-accept-edits",
       });
-      yield* adapter.sendTurn({ threadId, input: "ask me", attachments: [] });
-      const opened = yield* Fiber.join(openedFiber).pipe(Effect.timeout("2 seconds"));
-      NodeAssert.equal(opened._tag, "Some");
-      if (opened._tag === "Some") {
-        const requestId = opened.value.requestId;
-        NodeAssert.ok(requestId);
-        yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make(String(requestId)), {
+      const sent = yield* adapter.sendTurn({ threadId, input: "ask me", attachments: [] });
+      const opened = yield* Deferred.await(openedDeferred).pipe(Effect.timeout("2 seconds"));
+      NodeAssert.ok(opened.requestId);
+      NodeAssert.equal(opened.turnId, sent.turnId);
+      yield* adapter.respondToUserInput(
+        threadId,
+        ApprovalRequestId.make(String(opened.requestId)),
+        {
           "question-0": "TypeScript",
-        });
+        },
+      );
+      const events = yield* joinEvents(eventsFiber);
+      const resolved = events.find((event) => event.type === "user-input.resolved");
+      NodeAssert.ok(resolved);
+      if (resolved?.type === "user-input.resolved") {
+        NodeAssert.equal(resolved.turnId, sent.turnId);
       }
-      const completed = yield* Fiber.join(completedFiber).pipe(Effect.timeout("2 seconds"));
-      NodeAssert.equal(completed._tag, "Some");
       NodeAssert.deepEqual(askUserResult, {
         answers: [
           {

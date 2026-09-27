@@ -1725,6 +1725,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ],
         });
       }
+      if (request?.kind !== "user-input.requested") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            request?.kind === "user-input.resolved"
+              ? "This question has already been answered."
+              : "This question is no longer pending.",
+        });
+      }
       const responseEvent = {
         ...(yield* withEventBase({
           aggregateKind: "thread",

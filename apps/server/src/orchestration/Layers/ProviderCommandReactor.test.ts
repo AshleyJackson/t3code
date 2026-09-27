@@ -4092,6 +4092,39 @@ describe("ProviderCommandReactor", () => {
 
     await Effect.runPromise(
       harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-user-input-requested-before-response"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("activity-user-input-requested-before-response"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "user-input-request-1",
+            questions: [
+              {
+                id: "sandbox_mode",
+                header: "Sandbox",
+                question: "Which mode should be used?",
+                options: [
+                  {
+                    label: "workspace-write",
+                    description: "Allow workspace writes only",
+                  },
+                ],
+              },
+            ],
+          },
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
         type: "thread.user-input.respond",
         commandId: CommandId.make("cmd-user-input-respond"),
         threadId: ThreadId.make("thread-1"),
@@ -4214,9 +4247,9 @@ describe("ProviderCommandReactor", () => {
     harness.respondToUserInput.mockImplementation(() =>
       Effect.fail(
         new ProviderAdapterRequestError({
-          provider: ProviderDriverKind.make("claudeAgent"),
-          method: "item/tool/respondToUserInput",
-          detail: "Unknown pending Codex user input request: user-input-request-1",
+          provider: ProviderDriverKind.make("droid"),
+          method: "respondToUserInput",
+          detail: "Unknown pending Droid user-input request: user-input-request-1",
         }),
       ),
     );
@@ -4229,7 +4262,7 @@ describe("ProviderCommandReactor", () => {
         session: {
           threadId: ThreadId.make("thread-1"),
           status: "running",
-          providerName: "claudeAgent",
+          providerName: "droid",
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,

@@ -182,7 +182,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           context.pendingUserInputs.delete(requestId);
           pending.resolve({ cancelled: true, answers: [] });
           yield* emit({
-            ...eventBase(context, { requestId }),
+            ...eventBase(context, {
+              ...(pending.turnId ? { turnId: pending.turnId } : {}),
+              requestId,
+            }),
             type: "user-input.resolved",
             payload: { answers: {} },
           });
@@ -372,13 +375,19 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
             }
             const requestId = ApprovalRequestId.make(`droid-question-${NodeCrypto.randomUUID()}`);
             const questions = normalizeAskUserQuestions(params);
+            const turnId = context.session.activeTurnId;
             context.pendingUserInputs.set(requestId, {
               questions,
               droidQuestions: params.questions,
+              turnId,
               resolve,
             });
             void emitNow({
-              ...eventBase(context, { requestId, raw: params }),
+              ...eventBase(context, {
+                ...(turnId ? { turnId } : {}),
+                requestId,
+                raw: params,
+              }),
               raw: { source: "droid.sdk.permission", payload: params },
               type: "user-input.requested",
               payload: { questions },
@@ -551,6 +560,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           activeToolInputs: new Map(),
           activeToolOutputs: new Map(),
           activeToolInputFingerprints: new Map(),
+          activeDroidTasks: new Map(),
           activePlanFingerprint: undefined,
           activePlanToolUseSequences: new Map(),
           nextPlanToolUseSequence: 0,
@@ -1143,7 +1153,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           context.pendingUserInputs.delete(requestId);
           pending.resolve(toAskUserResult(pending.droidQuestions, answers));
           yield* emit({
-            ...eventBase(context, { requestId }),
+            ...eventBase(context, {
+              ...(pending.turnId ? { turnId: pending.turnId } : {}),
+              requestId,
+            }),
             type: "user-input.resolved",
             payload: { answers },
           });
