@@ -19,7 +19,7 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import { DROID_PROVIDER, type DroidContext, type DroidTaskState } from "./DroidAdapterTypes.ts";
-import { debugDroid, droidErrorDetails } from "./DroidDebug.ts";
+import { debugDroid, droidErrorDetails, droidTurnErrorMessage } from "./DroidDebug.ts";
 import {
   contentBlockText,
   droidProgressText,
@@ -132,8 +132,8 @@ export function makeDroidEventBase(instanceId: ProviderInstanceId) {
   });
 }
 
-type DroidEventBase = ReturnType<typeof makeDroidEventBase>;
-type DroidEvent = ReturnType<DroidEventBase>;
+export type DroidEventBase = ReturnType<typeof makeDroidEventBase>;
+export type DroidEvent = ReturnType<DroidEventBase>;
 
 function usageSnapshot(
   usage: TokenUsage | TokenUsageUpdate,
@@ -242,6 +242,7 @@ function droidTaskProgressUpdate(update: unknown): {
   readonly status: "running" | "completed" | "failed" | "stopped" | undefined;
   readonly description: string | undefined;
   readonly taskType: string | undefined;
+  readonly cwd: string | undefined;
   readonly summary: string | undefined;
   readonly lastToolName: string | undefined;
 } {
@@ -251,6 +252,7 @@ function droidTaskProgressUpdate(update: unknown): {
       status: undefined,
       description: undefined,
       taskType: undefined,
+      cwd: undefined,
       summary: undefined,
       lastToolName: undefined,
     };
@@ -258,6 +260,10 @@ function droidTaskProgressUpdate(update: unknown): {
   const record = update as Record<string, unknown>;
   const taskId = droidTaskText(record.subagentSessionId);
   const taskInput = droidTaskInput(record.parameters);
+  const cwd =
+    droidTaskText(record.cwd) ??
+    droidTaskText(record.workingDirectory) ??
+    droidTaskText(record.working_directory);
   const statusText = droidTaskText(record.status)?.toLowerCase();
   const status =
     statusText === "completed" || statusText === "success" || statusText === "succeeded"
@@ -274,6 +280,7 @@ function droidTaskProgressUpdate(update: unknown): {
     status,
     description: taskInput.description ?? droidTaskText(record.details),
     taskType: taskInput.taskType,
+    cwd,
     summary: droidTaskText(record.text) ?? droidTaskText(record.details),
     lastToolName: droidTaskText(record.toolName),
   };
@@ -284,6 +291,7 @@ async function emitDroidTaskStarted(input: {
   readonly taskId: string;
   readonly description: string | undefined;
   readonly taskType: string | undefined;
+  readonly cwd?: string;
   readonly toolUseId: string | undefined;
   readonly base: (itemId?: string) => DroidEvent;
   readonly emitNow: (event: ProviderRuntimeEvent) => Promise<void>;
@@ -295,10 +303,10 @@ async function emitDroidTaskStarted(input: {
     taskId: input.taskId,
     description: input.description ?? "Droid subagent",
     taskType: input.taskType,
+    ...(input.cwd ? { cwd: input.cwd } : {}),
     toolUseId: input.toolUseId,
     status: "running",
   };
-  tasks.set(task.taskId, task);
   await input.emitNow({
     ...input.base(input.toolUseId),
     type: "task.started",
@@ -311,6 +319,9 @@ async function emitDroidTaskStarted(input: {
       timelineBypass: true,
     },
   });
+  // The in-memory lifecycle begins only after the corresponding event is
+  // accepted. Otherwise a queue failure loses both the start and all retries.
+  tasks.set(task.taskId, task);
   return task;
 }
 
@@ -319,6 +330,7 @@ async function emitDroidTaskProgress(input: {
   readonly taskId: string;
   readonly description: string | undefined;
   readonly taskType: string | undefined;
+  readonly cwd?: string;
   readonly toolUseId: string | undefined;
   readonly summary: string | undefined;
   readonly lastToolName: string | undefined;
@@ -346,11 +358,12 @@ async function emitDroidTaskProgress(input: {
   });
 }
 
-async function emitDroidTaskCompleted(input: {
+export async function emitDroidTaskCompleted(input: {
   readonly context: DroidContext;
   readonly taskId: string;
   readonly description: string | undefined;
   readonly taskType: string | undefined;
+  readonly cwd?: string;
   readonly toolUseId: string | undefined;
   readonly status: "completed" | "failed" | "stopped";
   readonly base: (itemId?: string) => DroidEvent;
@@ -360,7 +373,6 @@ async function emitDroidTaskCompleted(input: {
   const existing = tasks.get(input.taskId);
   if (existing?.status !== undefined && existing.status !== "running") return existing;
   const task = await emitDroidTaskStarted(input);
-  tasks.set(task.taskId, { ...task, status: input.status });
   await input.emitNow({
     ...input.base(input.toolUseId),
     type: "task.completed",
@@ -375,6 +387,11 @@ async function emitDroidTaskCompleted(input: {
       timelineBypass: true,
     },
   });
+  // Mark the task terminal only after the event was accepted. If delivery
+  // fails, reconciliation must be able to retry the completion.
+  const completedTask = { ...task, status: input.status } as const;
+  tasks.set(task.taskId, completedTask);
+  return completedTask;
 }
 
 function droidNotificationTokenUsage(
@@ -580,11 +597,15 @@ export async function handleDroidNotification(input: {
       const toolUseId = droidNotificationString(notification, "toolUseId");
       const taskType = droidNotificationString(notification, "subagentType");
       const description = droidNotificationString(notification, "description");
+      const cwd =
+        droidNotificationString(notification, "cwd") ??
+        droidNotificationString(notification, "workingDirectory");
       return emitDroidTaskStarted({
         context,
         taskId,
         description,
         taskType,
+        ...(cwd ? { cwd } : {}),
         toolUseId,
         base,
         emitNow,
@@ -1090,6 +1111,7 @@ export async function handleDroidMessage(input: {
             taskId: taskUpdate.taskId,
             description: taskUpdate.description,
             taskType: taskUpdate.taskType,
+            ...(taskUpdate.cwd ? { cwd: taskUpdate.cwd } : {}),
             toolUseId: message.toolUseId,
             status: taskUpdate.status,
             base,
@@ -1381,7 +1403,12 @@ export async function handleDroidMessage(input: {
           ? "completed"
           : "failed";
       if (!message.success) {
-        context.activeTurnError = message.error?.message ?? "Droid reported an unsuccessful turn.";
+        context.activeTurnError = droidTurnErrorMessage(message.error);
+        await emitNow({
+          ...base(),
+          type: "runtime.error",
+          payload: { message: context.activeTurnError, class: "provider_error" },
+        });
       }
       clearDroidPlanTracking(context);
       return;

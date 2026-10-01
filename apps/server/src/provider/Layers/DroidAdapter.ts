@@ -43,6 +43,10 @@ import {
 } from "../droid/DroidAdapterTypes.ts";
 import { makeDroidObservability } from "../droid/DroidObservability.ts";
 import {
+  defaultDroidSessionsRoot,
+  reconcileDroidChildTasks,
+} from "../droid/DroidTaskReconciliation.ts";
+import {
   completeDroidContentItem,
   clearDroidPlanTracking,
   handleDroidNotification,
@@ -71,6 +75,7 @@ import {
   debugDroidSdkMessage,
   droidErrorDetails,
   droidErrorMessage,
+  droidTurnErrorMessage,
   isDroidRecoverableResumeSettingsError,
   isDroidSessionNotFoundError,
 } from "../droid/DroidDebug.ts";
@@ -147,8 +152,10 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
     const apiKey = env.FACTORY_API_KEY?.trim() || undefined;
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = Effect.runPromiseWith(runtimeContext);
-    const emit = (event: ProviderRuntimeEvent) =>
-      Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+    const emit = (event: ProviderRuntimeEvent) => {
+      if (event.type === "task.started") scheduleDroidTaskReconciliation();
+      return Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+    };
     const emitNow = (event: ProviderRuntimeEvent) => {
       debugDroidRuntimeEvent(event);
       return runPromise(emit(event));
@@ -160,6 +167,49 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       isCurrentContext(context) && context.session.activeTurnId === turnId;
     const emitCurrent = (context: DroidContext, event: ProviderRuntimeEvent) =>
       Effect.suspend(() => (isCurrentContext(context) ? emit(event) : Effect.void));
+
+    // The SDK stays silent when a background Task child finishes, so poll the
+    // child transcript for its terminal `agent_turn_outcome` record while any
+    // task is still running. The timer re-arms only while work remains and is
+    // first armed by the `task.started` intercept in `emit`.
+    const taskReconciliation = options?.taskReconciliation ?? {
+      sessionsRoot: defaultDroidSessionsRoot(),
+      intervalMs: 3_000,
+    };
+    let droidTaskReconcileTimer: ReturnType<typeof setTimeout> | undefined;
+    let droidTaskReconcileInFlight = false;
+    const scheduleDroidTaskReconciliation = () => {
+      if (droidTaskReconcileTimer !== undefined) return;
+      // @effect-diagnostics-next-line globalTimers:off - the poll runs outside the Effect runtime like the notification chain.
+      droidTaskReconcileTimer = setTimeout(() => {
+        droidTaskReconcileTimer = undefined;
+        if (droidTaskReconcileInFlight) {
+          scheduleDroidTaskReconciliation();
+          return;
+        }
+        droidTaskReconcileInFlight = true;
+        void reconcileDroidChildTasks({
+          contexts: sessions.values(),
+          isCurrentContext,
+          eventBase,
+          emitNow,
+          sessionsRoot: taskReconciliation.sessionsRoot,
+        })
+          .then((hasRunningTasks) => {
+            if (hasRunningTasks) scheduleDroidTaskReconciliation();
+          })
+          .catch(() => {
+            // Do not turn one unexpected reconciliation defect into a
+            // permanently stuck task. The next pass is deliberately cheap
+            // and will either settle the task or keep retrying it.
+            scheduleDroidTaskReconciliation();
+          })
+          .finally(() => {
+            droidTaskReconcileInFlight = false;
+          });
+      }, taskReconciliation.intervalMs);
+      droidTaskReconcileTimer.unref?.();
+    };
     debugDroid("adapter.created", {
       instanceId,
       enabled: settings.enabled,
@@ -735,7 +785,11 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               ...(modelId ? { specModeModelId: modelId } : {}),
               ...(reasoningEffort ? { specModeReasoningEffort: reasoningEffort } : {}),
             });
-          } else if (context.droid.settings.interactionMode === DroidInteractionMode.Spec) {
+          } else {
+            // The SDK settings snapshot can lag after a prior spec-mode turn.
+            // Always leave spec mode for a normal turn, otherwise Droid may
+            // answer with its generic plan acknowledgement instead of the
+            // requested response.
             await context.droid.exitSpecMode();
           }
           if (!isLiveTurn()) return;
@@ -809,7 +863,9 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           }
           if (context.activeTurnError || context.activeTurnState === "failed") {
             if (!isLiveTurn()) return;
-            const message = context.activeTurnError ?? "Droid reported an unsuccessful turn.";
+            const message = droidTurnErrorMessage(
+              context.activeTurnError ?? "Droid reported an unsuccessful turn.",
+            );
             context.activeAbort = undefined;
             updateDroidContextSession(context, {
               status: "error",

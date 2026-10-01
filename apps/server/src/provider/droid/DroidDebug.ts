@@ -67,6 +67,32 @@ export function droidErrorMessage(error: unknown, fallback = "Droid request fail
     .join(" — ");
 }
 
+function droidErrorText(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (!isRecord(error)) return "";
+  return [
+    error.name,
+    error.message,
+    error.errorType,
+    isRecord(error.metadata) ? error.metadata.code : undefined,
+    isRecord(error.metadata) ? error.metadata.message : undefined,
+  ]
+    .filter(
+      (value): value is string | number => typeof value === "string" || typeof value === "number",
+    )
+    .join(" ");
+}
+
+export function isDroidUsageLimitError(error: unknown): boolean {
+  return /\b(?:model_)?usage_exhausted\b/iu.test(droidErrorText(error));
+}
+
+export function droidTurnErrorMessage(error: unknown): string {
+  return isDroidUsageLimitError(error)
+    ? "Droid usage limit reached. Send the message again once the limit resets."
+    : droidErrorMessage(error, "Droid turn failed.");
+}
+
 /**
  * Resume recovery is intentionally limited to errors that identify a missing
  * persisted session or invalid session settings. Transport and auth failures
@@ -121,6 +147,7 @@ export function debugDroidSdkMessage(message: unknown): void {
     debugDroid("sdk.message.invalid", { kind: typeof message });
     return;
   }
+  if (message.type === "assistant_text_delta" || message.type === "thinking_text_delta") return;
 
   const details: DebugRecord = {
     type: message.type,
@@ -183,6 +210,7 @@ export function debugDroidRuntimeEvent(event: unknown): void {
     debugDroid("runtime.event.invalid", { kind: typeof event });
     return;
   }
+  if (event.type === "content.delta") return;
 
   const details: DebugRecord = {
     type: event.type,

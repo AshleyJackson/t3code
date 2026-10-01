@@ -190,7 +190,7 @@ describe("parseDroidThreadTitle", () => {
     }),
   );
 
-  it.effect("uses native structured output with the prompt schema", () =>
+  it.effect("uses plain JSON text output without native structured output", () =>
     Effect.gen(function* () {
       let streamOptions: MessageOptions | undefined;
       const textGeneration = makeDroidTextGeneration({
@@ -207,14 +207,11 @@ describe("parseDroidThreadTitle", () => {
                 durationMs: 1,
                 tokenUsage: null,
                 messages: [],
-                text: "",
+                text: '{"title":"Plain text title","needsRefinement":false}',
                 turnCount: 1,
                 success: true,
                 interrupted: false,
-                structuredOutput: {
-                  title: "Native title",
-                  needsRefinement: false,
-                },
+                structuredOutput: null,
                 structuredOutputError: null,
                 error: null,
               };
@@ -228,17 +225,9 @@ describe("parseDroidThreadTitle", () => {
         modelSelection: createModelSelection(ProviderInstanceId.make("droid"), "default"),
       });
 
-      expect(result.title).toBe("Native title");
-      expect(streamOptions?.outputFormat).toMatchObject({
-        type: "json_schema",
-        schema: {
-          required: ["title", "needsRefinement"],
-          properties: {
-            title: { type: "string" },
-            needsRefinement: { type: "boolean" },
-          },
-        },
-      });
+      expect(result.title).toBe("Plain text title");
+      expect(streamOptions?.includePartialMessages).toBe(false);
+      expect(streamOptions?.outputFormat).toBeUndefined();
     }),
   );
 

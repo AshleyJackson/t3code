@@ -41,6 +41,7 @@ export interface DroidTaskState {
   readonly taskId: string;
   readonly description: string;
   readonly taskType: string | undefined;
+  readonly cwd?: string;
   readonly toolUseId: string | undefined;
   status: "running" | "completed" | "failed" | "stopped";
 }
@@ -118,6 +119,11 @@ export interface DroidAdapterOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly observability?: DroidObservability;
+  /** Test seam: where the reconciler reads CLI transcripts and how often it polls. */
+  readonly taskReconciliation?: {
+    readonly sessionsRoot: string;
+    readonly intervalMs: number;
+  };
   readonly sdk?: {
     readonly createSession: (options?: CreateSessionOptions) => Promise<DroidSession>;
     readonly resumeSession: (

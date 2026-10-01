@@ -33,8 +33,10 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -52,6 +54,15 @@ const settings = Schema.decodeSync(DroidSettings)({
   enabled: true,
   binaryPath: "fake-droid",
 });
+const childTranscript = [
+  JSON.stringify({ type: "session_start", id: "child-done" }),
+  JSON.stringify({
+    type: "agent_turn_outcome",
+    turnId: "turn-child",
+    reason: "completed",
+    resultKind: "text",
+  }),
+].join("\n");
 const testLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-droid-adapter-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
@@ -86,10 +97,13 @@ function fakeSession(
     readonly onListMcpTools?: () => Promise<Awaited<ReturnType<DroidSession["listMcpTools"]>>>;
     readonly onListTools?: () => Promise<Awaited<ReturnType<DroidSession["listTools"]>>>;
     readonly onListSkills?: () => Promise<Awaited<ReturnType<DroidSession["listSkills"]>>>;
+    readonly initialInteractionMode?: DroidInteractionMode;
     readonly id?: string;
   },
 ): DroidSession {
-  let sessionSettings = { interactionMode: DroidInteractionMode.Auto } as DroidSession["settings"];
+  let sessionSettings = {
+    interactionMode: hooks?.initialInteractionMode ?? DroidInteractionMode.Auto,
+  } as DroidSession["settings"];
   let sessionCwd = hooks?.cwd ?? process.cwd();
   return {
     id: hooks?.id ?? "droid-test-session",
@@ -285,6 +299,58 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
           lastReasoningOutputTokens: 1,
         },
       );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("exits stale spec mode before a normal turn", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-stale-spec-mode");
+      let session: DroidSession | undefined;
+      const adapter = yield* makeDroidAdapter(settings, {
+        instanceId: ProviderInstanceId.make("droid"),
+        sdk: {
+          createSession: async () => {
+            session = fakeSession(
+              [
+                {
+                  type: "result",
+                  subtype: "success",
+                  sessionId: "droid-test-session",
+                  durationMs: 1,
+                  tokenUsage: null,
+                  messages: [],
+                  text: "actual response",
+                  turnCount: 1,
+                  success: true,
+                  interrupted: false,
+                  error: null,
+                },
+              ],
+              { initialInteractionMode: DroidInteractionMode.Spec },
+            );
+            return session;
+          },
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const completed = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "respond normally", attachments: [] });
+      yield* Fiber.join(completed).pipe(Effect.timeout("2 seconds"));
+
+      NodeAssert.equal(session?.settings.interactionMode, DroidInteractionMode.Auto);
     }),
   ).pipe(Effect.provide(testLayer)),
 );
@@ -578,6 +644,84 @@ it.effect("maps native notifications into usage and hook lifecycle events", () =
       NodeAssert.equal(
         hooks[4]?.type === "hook.completed" ? hooks[4].payload.outcome : undefined,
         "cancelled",
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("settles finished background tasks from child transcripts", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const sessionsRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-droid-reconcile-",
+      });
+      const cwd = "C:\\proj";
+      const childDir = path.join(sessionsRoot, "-C-proj");
+      yield* fileSystem.makeDirectory(childDir, { recursive: true }).pipe(Effect.orDie);
+      yield* fileSystem
+        .writeFileString(path.join(childDir, "child-done.jsonl"), `${childTranscript}\n`)
+        .pipe(Effect.orDie);
+
+      let notify: ((notification: Record<string, unknown>) => void) | undefined;
+      const threadId = ThreadId.make("droid-task-reconcile");
+      const adapter = yield* makeDroidAdapter(settings, {
+        sdk: {
+          createSession: async () =>
+            fakeSession([], {
+              cwd,
+              onNotification: (callback) => {
+                notify = callback;
+                return () => undefined;
+              },
+            }),
+          resumeSession: async () => fakeSession([]),
+        },
+        taskReconciliation: { sessionsRoot, intervalMs: 20 },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "task.started" || event.type === "task.completed"),
+        ),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd,
+        runtimeMode: "full-access",
+      });
+      notify?.({
+        method: "droid.session_notification",
+        params: {
+          notification: {
+            type: "child_session_available",
+            childSessionId: "child-done",
+            toolUseId: "task-tool-done",
+            subagentType: "worker",
+            description: "Describe the screenshot",
+          },
+        },
+      });
+
+      const events = yield* joinEvents(eventsFiber);
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["task.started", "task.completed"],
+      );
+      const completed = events[1];
+      NodeAssert.equal(
+        completed?.type === "task.completed" ? completed.payload.status : undefined,
+        "completed",
+      );
+      NodeAssert.equal(
+        completed?.type === "task.completed" ? completed.payload.taskId : undefined,
+        "child-done",
       );
     }),
   ).pipe(Effect.provide(testLayer)),
