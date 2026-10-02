@@ -335,9 +335,10 @@ it.effect("exits stale spec mode before a normal turn", () =>
           resumeSession: async () => fakeSession([]),
         },
       });
-      const completed = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(4),
+        Stream.runCollect,
         Effect.forkChild,
       );
 
@@ -348,9 +349,88 @@ it.effect("exits stale spec mode before a normal turn", () =>
         runtimeMode: "full-access",
       });
       yield* adapter.sendTurn({ threadId, input: "respond normally", attachments: [] });
-      yield* Fiber.join(completed).pipe(Effect.timeout("2 seconds"));
+      const events = yield* joinEvents(eventsFiber);
 
       NodeAssert.equal(session?.settings.interactionMode, DroidInteractionMode.Auto);
+      NodeAssert.equal(
+        events.some(
+          (event) =>
+            event.type === "content.delta" &&
+            event.payload.streamKind === "assistant_text" &&
+            event.payload.delta === "actual response",
+        ),
+        true,
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("reconciles aggregate result text after partial assistant output", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-aggregate-result");
+      const adapter = yield* makeDroidAdapter(settings, {
+        instanceId: ProviderInstanceId.make("droid"),
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "assistant_text_delta",
+                messageId: "m1",
+                blockIndex: 0,
+                text: "actual ",
+              },
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "actual response",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "respond normally", attachments: [] });
+      const events = yield* joinEvents(eventsFiber);
+
+      NodeAssert.deepEqual(
+        events
+          .filter(
+            (event) =>
+              event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+          )
+          .map((event) => (event.type === "content.delta" ? event.payload.delta : "")),
+        ["actual ", "response"],
+      );
+      NodeAssert.equal(
+        events.some(
+          (event) =>
+            event.type === "item.completed" &&
+            event.payload.itemType === "assistant_message" &&
+            event.payload.detail === "actual response",
+        ),
+        true,
+      );
     }),
   ).pipe(Effect.provide(testLayer)),
 );

@@ -97,6 +97,28 @@ function longestMatchingAssistantPrefix(context: DroidContext, text: string): st
   return longest;
 }
 
+function appendDroidAggregateAssistantResult(
+  context: DroidContext,
+  text: string,
+): { readonly itemId: string; readonly delta: string } | undefined {
+  const matchingItem = [...context.activeAssistantItems.entries()]
+    .filter(([, currentText]) => text.startsWith(currentText))
+    .sort(([, left], [, right]) => right.length - left.length)[0];
+  if (matchingItem) {
+    const [itemId, currentText] = matchingItem;
+    context.activeAssistantItems.set(itemId, text);
+    return { itemId, delta: text.slice(currentText.length) };
+  }
+
+  if ([...context.activeAssistantItems.values()].some((value) => value.trim().length > 0)) {
+    return undefined;
+  }
+
+  const itemId = `${context.session.activeTurnId ?? "droid"}-result`;
+  context.activeAssistantItems.set(itemId, text);
+  return { itemId, delta: text };
+}
+
 export function updateDroidContextSession(
   context: DroidContext,
   patch: Partial<DroidContext["session"]>,
@@ -1396,6 +1418,20 @@ export async function handleDroidMessage(input: {
           context.cumulativeTokenUsage = usage;
         }
         if (context.retired || context.session.activeTurnId !== turnId) return;
+      }
+      if (message.success && message.text.trim().length > 0) {
+        // Droid's aggregate result is the canonical snapshot for a turn. It
+        // may be the only assistant output, or it may contain text omitted
+        // from the partial stream. Reconcile it as a suffix so the adapter's
+        // normal end-of-turn flush can complete the assistant item.
+        const aggregate = appendDroidAggregateAssistantResult(context, message.text);
+        if (aggregate?.delta) {
+          await emitNow({
+            ...base(aggregate.itemId),
+            type: "content.delta",
+            payload: { streamKind: "assistant_text", delta: aggregate.delta },
+          });
+        }
       }
       context.activeTurnState = message.interrupted
         ? "interrupted"
