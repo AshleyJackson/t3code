@@ -208,6 +208,20 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
                 text: "hello",
               },
               {
+                type: "assistant",
+                message: {
+                  id: "plan-status",
+                  role: "assistant",
+                  content: [{ type: "text" as never, text: "Plan is up-to-date." }],
+                } as never,
+                text: "Plan is up-to-date.",
+              },
+              {
+                type: "assistant_text_complete",
+                messageId: "plan-status",
+                blockIndex: 0,
+              },
+              {
                 type: "token_usage_update",
                 inputTokens: 10,
                 outputTokens: 4,

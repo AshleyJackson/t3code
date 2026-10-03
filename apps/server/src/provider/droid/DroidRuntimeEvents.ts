@@ -87,6 +87,17 @@ export function completeDroidContentItem(
   return true;
 }
 
+export function isDroidStatusAssistantText(text: string | undefined): boolean {
+  if (!text) return false;
+  const normalized = text.replace(/\s+/gu, " ").trim();
+  return (
+    /^(?:the )?plan is up(?:-| )to(?:-| )date[.!]?$/iu.test(normalized) ||
+    /^(?:i['’]m|i am|i['’]ll|i will)\s+(?:(?:now|still|just|currently)\s+)?(?:checking|verifying|reviewing|inspecting|running|rebuilding|deploying|configuring|confirming|retrying|continuing|looking|reading|tracing|investigating|starting|publishing|removing|adding|updating|testing|validating|doing)\b/iu.test(
+      normalized,
+    )
+  );
+}
+
 function longestMatchingAssistantPrefix(context: DroidContext, text: string): string {
   let longest = "";
   for (const candidate of context.activeAssistantItems.values()) {
@@ -939,6 +950,10 @@ export async function handleDroidMessage(input: {
       const itemId = `${message.messageId}-${message.blockIndex}`;
       const text = `${context.activeAssistantItems.get(itemId) ?? ""}${message.text}`;
       context.activeAssistantItems.set(itemId, text);
+      if (isDroidStatusAssistantText(text)) {
+        context.suppressedAssistantItems.add(itemId);
+        return;
+      }
       return emitNow({
         ...base(itemId),
         type: "content.delta",
@@ -947,7 +962,12 @@ export async function handleDroidMessage(input: {
     }
     case "assistant_text_complete": {
       const itemId = `${message.messageId}-${message.blockIndex}`;
+      if (context.suppressedAssistantItems.delete(itemId)) return;
       const detail = context.activeAssistantItems.get(itemId);
+      if (isDroidStatusAssistantText(detail)) {
+        context.suppressedAssistantItems.add(itemId);
+        return;
+      }
       if (
         !completeDroidContentItem(
           context.activeCompletedAssistantItems,
@@ -1010,6 +1030,10 @@ export async function handleDroidMessage(input: {
         const itemId = `${message.message.id}-${index}`;
         const isThinking = block.type === "thinking";
         const activeItems = isThinking ? context.activeThinkingItems : context.activeAssistantItems;
+        if (!isThinking && isDroidStatusAssistantText(text)) {
+          context.suppressedAssistantItems.add(itemId);
+          return;
+        }
         const previousText =
           activeItems.get(itemId) ??
           (isThinking ? "" : longestMatchingAssistantPrefix(context, text));
@@ -1041,6 +1065,11 @@ export async function handleDroidMessage(input: {
         return;
       }
       const completedItemId = `${message.message.id}-${firstTextIndex}`;
+      if (context.suppressedAssistantItems.delete(completedItemId)) return;
+      if (isDroidStatusAssistantText(contentBlockText(firstTextBlock))) {
+        context.suppressedAssistantItems.add(completedItemId);
+        return;
+      }
       if (
         !completeDroidContentItem(
           context.activeCompletedAssistantItems,

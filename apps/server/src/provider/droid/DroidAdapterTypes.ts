@@ -59,6 +59,7 @@ export interface DroidContext {
   activeThinkingItems: Map<string, string>;
   activeCompletedAssistantItems: Set<string>;
   activeCompletedAssistantContents: Set<string>;
+  suppressedAssistantItems: Set<string>;
   activeCompletedThinkingItems: Set<string>;
   activeCompletedThinkingContents: Set<string>;
   activeStartedToolIds: Set<string>;

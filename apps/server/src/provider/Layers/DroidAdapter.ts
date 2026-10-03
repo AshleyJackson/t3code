@@ -54,6 +54,7 @@ import {
   makeDroidEventBase,
   meaningfulDroidCompactionTokenCounts,
   nowIso,
+  isDroidStatusAssistantText,
   refreshDroidContextStats,
   updateDroidContextSession,
 } from "../droid/DroidRuntimeEvents.ts";
@@ -604,6 +605,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           activeThinkingItems: new Map(),
           activeCompletedAssistantItems: new Set(),
           activeCompletedAssistantContents: new Set(),
+          suppressedAssistantItems: new Set(),
           activeCompletedThinkingItems: new Set(),
           activeCompletedThinkingContents: new Set(),
           activeStartedToolIds: new Set(),
@@ -737,6 +739,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       context.activeThinkingItems = new Map();
       context.activeCompletedAssistantItems = new Set();
       context.activeCompletedAssistantContents = new Set();
+      context.suppressedAssistantItems = new Set();
       context.activeCompletedThinkingItems = new Set();
       context.activeCompletedThinkingContents = new Set();
       context.activeStartedToolIds = new Set();
@@ -887,6 +890,12 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
 
           for (const [itemId, detail] of context.activeAssistantItems) {
             if (!isLiveTurn()) return;
+            if (
+              context.suppressedAssistantItems.has(itemId) ||
+              isDroidStatusAssistantText(detail)
+            ) {
+              continue;
+            }
             if (
               !completeDroidContentItem(
                 context.activeCompletedAssistantItems,
