@@ -47,6 +47,7 @@ import {
   useWindowDimensions,
   View,
   type GestureResponderEvent,
+  type ViewInstance,
 } from "react-native";
 import {
   KeyboardController,
@@ -321,7 +322,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const composerEditorRef = useRef<ComposerEditorHandle>(null);
   const draftMessageRef = useRef(props.draftMessage);
   draftMessageRef.current = props.draftMessage;
-  const composerOverlayRef = useRef<View>(null);
+  const composerOverlayRef = useRef<ViewInstance>(null);
   const listRef = useRef<LegendListRef>(null);
   const feedTouchStartRef = useRef<{ pageX: number; pageY: number } | null>(null);
   const selectedThreadKeyRef = useRef(selectedThreadKey);
@@ -679,10 +680,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const isSplitLayout = layoutVariant === "split";
   const contentMaxWidth = isSplitLayout ? CHAT_CONTENT_MAX_WIDTH : undefined;
   const workspaceContentWidth = useWorkspaceContentWidth();
+  // Clearing animated width can retain the unfolded width after Android resumes folded.
+  // Assign both layouts explicitly so the dock always follows its current parent.
   const composerWidthStyle = useAnimatedStyle(() =>
     isSplitLayout && workspaceContentWidth !== null
-      ? { width: workspaceContentWidth.value, right: undefined }
-      : { width: undefined, right: 0 },
+      ? { width: workspaceContentWidth.value }
+      : { width: "100%" },
   );
   const selectedInstanceId = props.selectedThread.modelSelection.instanceId;
   useStreamingHaptics(props.selectedThread.id, props.selectedThreadFeed);
@@ -964,7 +967,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           <Animated.View
             layout={COMPOSER_LAYOUT_TRANSITION}
             pointerEvents="box-none"
-            style={[{ position: "absolute", bottom: 0, left: 0, right: 0 }, composerWidthStyle]}
+            style={[{ position: "absolute", bottom: 0, left: 0 }, composerWidthStyle]}
           >
             {/* No paddingTop here: the overlay's measured height becomes the
                 list's bottom inset, so any padding above the pill/composer
