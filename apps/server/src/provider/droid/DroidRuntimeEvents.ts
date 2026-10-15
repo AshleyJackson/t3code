@@ -98,9 +98,41 @@ export function isDroidStatusAssistantText(text: string | undefined): boolean {
   );
 }
 
+const droidPlanStatusPhrases = [
+  "plan is up-to-date",
+  "plan is up to date",
+  "the plan is up-to-date",
+  "the plan is up to date",
+];
+
+function isPotentialDroidPlanStatusText(text: string | undefined): boolean {
+  if (!text) return false;
+  const normalized = text
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/u, "");
+  return (
+    normalized.length > 0 && droidPlanStatusPhrases.some((phrase) => phrase.startsWith(normalized))
+  );
+}
+
+export function isTruncatedDroidPlanStatusText(text: string | undefined): boolean {
+  if (!text) return false;
+  const normalized = text
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/u, "");
+  return droidPlanStatusPhrases.some(
+    (phrase) => phrase.startsWith(normalized) && normalized.length < phrase.length,
+  );
+}
+
 function longestMatchingAssistantPrefix(context: DroidContext, text: string): string {
   let longest = "";
-  for (const candidate of context.activeAssistantItems.values()) {
+  for (const [itemId, candidate] of context.activeAssistantItems) {
+    if (context.pendingPlanStatusItems.has(itemId)) continue;
     if (candidate.length > longest.length && text.startsWith(candidate)) {
       longest = candidate;
     }
@@ -117,11 +149,19 @@ function appendDroidAggregateAssistantResult(
     .sort(([, left], [, right]) => right.length - left.length)[0];
   if (matchingItem) {
     const [itemId, currentText] = matchingItem;
+    const wasPendingPlanStatus = context.pendingPlanStatusItems.delete(itemId);
     context.activeAssistantItems.set(itemId, text);
-    return { itemId, delta: text.slice(currentText.length) };
+    return {
+      itemId,
+      delta: wasPendingPlanStatus ? text : text.slice(currentText.length),
+    };
   }
 
-  if ([...context.activeAssistantItems.values()].some((value) => value.trim().length > 0)) {
+  if (
+    [...context.activeAssistantItems].some(
+      ([itemId, value]) => value.trim().length > 0 && !context.pendingPlanStatusItems.has(itemId),
+    )
+  ) {
     return undefined;
   }
 
@@ -950,24 +990,34 @@ export async function handleDroidMessage(input: {
       const itemId = `${message.messageId}-${message.blockIndex}`;
       const text = `${context.activeAssistantItems.get(itemId) ?? ""}${message.text}`;
       context.activeAssistantItems.set(itemId, text);
+      if (isPotentialDroidPlanStatusText(text)) {
+        context.pendingPlanStatusItems.add(itemId);
+        return;
+      }
       if (isDroidStatusAssistantText(text)) {
+        context.pendingPlanStatusItems.delete(itemId);
         context.suppressedAssistantItems.add(itemId);
         return;
       }
+      const wasPendingPlanStatus = context.pendingPlanStatusItems.delete(itemId);
       return emitNow({
         ...base(itemId),
         type: "content.delta",
-        payload: { streamKind: "assistant_text", delta: message.text },
+        payload: {
+          streamKind: "assistant_text",
+          delta: wasPendingPlanStatus ? text : message.text,
+        },
       });
     }
     case "assistant_text_complete": {
       const itemId = `${message.messageId}-${message.blockIndex}`;
-      if (context.suppressedAssistantItems.delete(itemId)) return;
+      const wasPendingPlanStatus = context.pendingPlanStatusItems.delete(itemId);
       const detail = context.activeAssistantItems.get(itemId);
-      if (isDroidStatusAssistantText(detail)) {
+      if (isDroidStatusAssistantText(detail) || isTruncatedDroidPlanStatusText(detail)) {
         context.suppressedAssistantItems.add(itemId);
         return;
       }
+      if (context.suppressedAssistantItems.delete(itemId)) return;
       if (
         !completeDroidContentItem(
           context.activeCompletedAssistantItems,
@@ -977,6 +1027,13 @@ export async function handleDroidMessage(input: {
         )
       ) {
         return;
+      }
+      if (wasPendingPlanStatus && detail) {
+        await emitNow({
+          ...base(itemId),
+          type: "content.delta",
+          payload: { streamKind: "assistant_text", delta: detail },
+        });
       }
       return emitNow({
         ...base(itemId),
@@ -1031,13 +1088,23 @@ export async function handleDroidMessage(input: {
         const isThinking = block.type === "thinking";
         const activeItems = isThinking ? context.activeThinkingItems : context.activeAssistantItems;
         if (!isThinking && isDroidStatusAssistantText(text)) {
+          context.pendingPlanStatusItems.delete(itemId);
           context.suppressedAssistantItems.add(itemId);
           return;
         }
+        if (!isThinking && isPotentialDroidPlanStatusText(text)) {
+          activeItems.set(itemId, text);
+          context.pendingPlanStatusItems.add(itemId);
+          return;
+        }
+        const wasPendingPlanStatus = !isThinking && context.pendingPlanStatusItems.delete(itemId);
         const previousText =
           activeItems.get(itemId) ??
           (isThinking ? "" : longestMatchingAssistantPrefix(context, text));
-        const delta = text.startsWith(previousText) ? text.slice(previousText.length) : text;
+        const delta =
+          wasPendingPlanStatus || !text.startsWith(previousText)
+            ? text
+            : text.slice(previousText.length);
         if (delta.length > 0) {
           await emitNow({
             ...base(itemId),
@@ -1065,11 +1132,16 @@ export async function handleDroidMessage(input: {
         return;
       }
       const completedItemId = `${message.message.id}-${firstTextIndex}`;
-      if (context.suppressedAssistantItems.delete(completedItemId)) return;
-      if (isDroidStatusAssistantText(contentBlockText(firstTextBlock))) {
+      const wasPendingPlanStatus = context.pendingPlanStatusItems.delete(completedItemId);
+      const completedText = contentBlockText(firstTextBlock);
+      if (
+        isDroidStatusAssistantText(completedText) ||
+        isTruncatedDroidPlanStatusText(completedText)
+      ) {
         context.suppressedAssistantItems.add(completedItemId);
         return;
       }
+      if (context.suppressedAssistantItems.delete(completedItemId)) return;
       if (
         !completeDroidContentItem(
           context.activeCompletedAssistantItems,
@@ -1080,13 +1152,20 @@ export async function handleDroidMessage(input: {
       ) {
         return;
       }
+      if (wasPendingPlanStatus) {
+        await emitNow({
+          ...base(completedItemId),
+          type: "content.delta",
+          payload: { streamKind: "assistant_text", delta: completedText },
+        });
+      }
       return emitNow({
         ...base(completedItemId),
         type: "item.completed",
         payload: {
           itemType: "assistant_message",
           status: "completed",
-          detail: contentBlockText(firstTextBlock),
+          detail: completedText,
         },
       });
     }
@@ -1454,7 +1533,12 @@ export async function handleDroidMessage(input: {
         // from the partial stream. Reconcile it as a suffix so the adapter's
         // normal end-of-turn flush can complete the assistant item.
         const aggregate = appendDroidAggregateAssistantResult(context, message.text);
-        if (aggregate?.delta) {
+        if (
+          aggregate &&
+          (isDroidStatusAssistantText(message.text) || isTruncatedDroidPlanStatusText(message.text))
+        ) {
+          context.suppressedAssistantItems.add(aggregate.itemId);
+        } else if (aggregate?.delta) {
           await emitNow({
             ...base(aggregate.itemId),
             type: "content.delta",
