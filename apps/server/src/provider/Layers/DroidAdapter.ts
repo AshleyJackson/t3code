@@ -55,6 +55,7 @@ import {
   meaningfulDroidCompactionTokenCounts,
   nowIso,
   isDroidStatusAssistantText,
+  isTruncatedDroidPlanStatusText,
   refreshDroidContextStats,
   updateDroidContextSession,
 } from "../droid/DroidRuntimeEvents.ts";
@@ -606,6 +607,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
           activeCompletedAssistantItems: new Set(),
           activeCompletedAssistantContents: new Set(),
           suppressedAssistantItems: new Set(),
+          pendingPlanStatusItems: new Set(),
           activeCompletedThinkingItems: new Set(),
           activeCompletedThinkingContents: new Set(),
           activeStartedToolIds: new Set(),
@@ -740,6 +742,7 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
       context.activeCompletedAssistantItems = new Set();
       context.activeCompletedAssistantContents = new Set();
       context.suppressedAssistantItems = new Set();
+      context.pendingPlanStatusItems = new Set();
       context.activeCompletedThinkingItems = new Set();
       context.activeCompletedThinkingContents = new Set();
       context.activeStartedToolIds = new Set();
@@ -890,12 +893,13 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
 
           for (const [itemId, detail] of context.activeAssistantItems) {
             if (!isLiveTurn()) return;
-            if (
-              context.suppressedAssistantItems.has(itemId) ||
-              isDroidStatusAssistantText(detail)
-            ) {
+            const wasPendingPlanStatus = context.pendingPlanStatusItems.delete(itemId);
+            if (isDroidStatusAssistantText(detail) || isTruncatedDroidPlanStatusText(detail)) {
+              context.suppressedAssistantItems.add(itemId);
               continue;
             }
+            if (context.suppressedAssistantItems.has(itemId) && !wasPendingPlanStatus) continue;
+            context.suppressedAssistantItems.delete(itemId);
             if (
               !completeDroidContentItem(
                 context.activeCompletedAssistantItems,
@@ -905,6 +909,13 @@ export function makeDroidAdapter(settings: DroidSettings, options?: DroidAdapter
               )
             ) {
               continue;
+            }
+            if (wasPendingPlanStatus && detail) {
+              await emitNow({
+                ...eventBase(context, { turnId, itemId }),
+                type: "content.delta",
+                payload: { streamKind: "assistant_text", delta: detail },
+              });
             }
             await emitNow({
               ...eventBase(context, { turnId, itemId }),

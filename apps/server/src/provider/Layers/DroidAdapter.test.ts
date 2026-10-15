@@ -222,6 +222,68 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
                 blockIndex: 0,
               },
               {
+                type: "assistant_text_delta",
+                messageId: "truncated-plan-status",
+                blockIndex: 0,
+                text: "Plan is up-",
+              },
+              {
+                type: "assistant_text_delta",
+                messageId: "truncated-plan-status",
+                blockIndex: 0,
+                text: "to",
+              },
+              {
+                type: "assistant_text_complete",
+                messageId: "truncated-plan-status",
+                blockIndex: 0,
+              },
+              {
+                type: "assistant_text_delta",
+                messageId: "short-truncated-plan-status",
+                blockIndex: 0,
+                text: "Plan is up-",
+              },
+              {
+                type: "assistant_text_complete",
+                messageId: "short-truncated-plan-status",
+                blockIndex: 0,
+              },
+              {
+                type: "assistant_text_delta",
+                messageId: "plan-status-with-response",
+                blockIndex: 0,
+                text: "Plan is up-to",
+              },
+              {
+                type: "assistant_text_delta",
+                messageId: "plan-status-with-response",
+                blockIndex: 0,
+                text: "-date. The migration is complete.",
+              },
+              {
+                type: "assistant_text_complete",
+                messageId: "plan-status-with-response",
+                blockIndex: 0,
+              },
+              {
+                type: "assistant_text_delta",
+                messageId: "complete-plan-status-with-response",
+                blockIndex: 0,
+                text: "Plan is up-to-date.",
+              },
+              {
+                type: "assistant_text_delta",
+                messageId: "complete-plan-status-with-response",
+                blockIndex: 0,
+                text: " The final checks passed.",
+              },
+              {
+                type: "assistant_text_complete",
+                messageId: "complete-plan-status-with-response",
+                blockIndex: 0,
+              },
+              {
                 type: "token_usage_update",
                 inputTokens: 10,
                 outputTokens: 4,
@@ -249,7 +311,7 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
       });
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.threadId === threadId),
-        Stream.take(8),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -289,13 +351,18 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
           (event) =>
             event.type === "item.completed" && event.payload.itemType === "assistant_message",
         ).length,
-        1,
+        3,
       );
       NodeAssert.deepEqual(
         events
           .filter((event) => event.type === "content.delta")
           .map((event) => (event.type === "content.delta" ? event.payload.delta : "")),
-        ["hel", "lo"],
+        [
+          "hel",
+          "lo",
+          "Plan is up-to-date. The migration is complete.",
+          "Plan is up-to-date. The final checks passed.",
+        ],
       );
       const usage = events.find((event) => event.type === "thread.token-usage.updated");
       NodeAssert.deepEqual(
@@ -312,6 +379,70 @@ it.effect("streams partial assistant output once and accumulates usage", () =>
           lastOutputTokens: 5,
           lastReasoningOutputTokens: 1,
         },
+      );
+    }),
+  ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("does not present a truncated plan acknowledgment as the final response", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("droid-truncated-plan-status");
+      const adapter = yield* makeDroidAdapter(settings, {
+        instanceId: ProviderInstanceId.make("droid"),
+        sdk: {
+          createSession: async () =>
+            fakeSession([
+              {
+                type: "result",
+                subtype: "success",
+                sessionId: "droid-test-session",
+                durationMs: 1,
+                tokenUsage: null,
+                messages: [],
+                text: "Plan is up-to",
+                turnCount: 1,
+                success: true,
+                interrupted: false,
+                error: null,
+              },
+            ]),
+          resumeSession: async () => fakeSession([]),
+        },
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("droid"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "finish the task",
+        attachments: [],
+      });
+
+      const events = yield* joinEvents(eventsFiber);
+      NodeAssert.equal(
+        events.some(
+          (event) =>
+            event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+        ),
+        false,
+      );
+      NodeAssert.equal(
+        events.some(
+          (event) =>
+            event.type === "item.completed" && event.payload.itemType === "assistant_message",
+        ),
+        false,
       );
     }),
   ).pipe(Effect.provide(testLayer)),
@@ -413,7 +544,7 @@ it.effect("reconciles aggregate result text after partial assistant output", () 
       });
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.threadId === threadId),
-        Stream.take(6),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -436,14 +567,14 @@ it.effect("reconciles aggregate result text after partial assistant output", () 
           .map((event) => (event.type === "content.delta" ? event.payload.delta : "")),
         ["actual ", "response"],
       );
-      NodeAssert.equal(
-        events.some(
-          (event) =>
-            event.type === "item.completed" &&
-            event.payload.itemType === "assistant_message" &&
-            event.payload.detail === "actual response",
-        ),
-        true,
+      NodeAssert.deepEqual(
+        events
+          .filter(
+            (event) =>
+              event.type === "item.completed" && event.payload.itemType === "assistant_message",
+          )
+          .map((event) => (event.type === "item.completed" ? event.payload.detail : undefined)),
+        ["actual response"],
       );
     }),
   ).pipe(Effect.provide(testLayer)),

@@ -60,6 +60,7 @@ export interface DroidContext {
   activeCompletedAssistantItems: Set<string>;
   activeCompletedAssistantContents: Set<string>;
   suppressedAssistantItems: Set<string>;
+  pendingPlanStatusItems: Set<string>;
   activeCompletedThinkingItems: Set<string>;
   activeCompletedThinkingContents: Set<string>;
   activeStartedToolIds: Set<string>;
